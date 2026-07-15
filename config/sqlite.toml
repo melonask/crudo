@@ -1,0 +1,220 @@
+# SQLite development configuration. PostgreSQL users should use `postgres.toml`.
+[server]
+# Bind to 0.0.0.0 in a container; loopback is safer for local development.
+address = "127.0.0.1:3000"
+# Mounted before every endpoint path, including the ALTCHA challenge path.
+prefix = "v1"
+
+[server.limits]
+# Maximum decoded request body size in bytes.
+body_bytes = 1048576
+# Per-request wall-clock timeout and simultaneous request ceiling.
+timeout_seconds = 30
+concurrency = 100
+# Requests allowed per direct client IP in each window; 0 disables rate limiting.
+requests = 120
+window_seconds = 60
+
+[altcha]
+path = "/challenge"
+# Development values only. Inject strong independent secrets in production.
+secret = "development-only-change-me"
+key_secret = "development-key-only-change-me"
+algorithm = "PBKDF2/SHA-256"
+cost = 5000
+max_number = 10000
+expires_seconds = 300
+bind_ip = true
+
+[database]
+# mode=rwc opens an existing database or creates it when absent.
+url = "sqlite://crudo.db?mode=rwc"
+# Idempotent setup runs atomically before the server starts.
+setup = [
+  """
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    password TEXT NOT NULL,
+    balance INTEGER NOT NULL DEFAULT 0
+  )
+  """,
+  """
+  CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL
+  )
+  """,
+  """
+  CREATE TABLE IF NOT EXISTS transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    external_id TEXT NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    amount INTEGER NOT NULL CHECK (amount > 0),
+    credited_at INTEGER,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+  )
+  """,
+  """
+  CREATE TRIGGER IF NOT EXISTS credit_confirmed_deposit_insert
+  AFTER INSERT ON transactions
+  WHEN NEW.type = 'deposit'
+    AND NEW.status = 'confirmed'
+    AND NEW.credited_at IS NULL
+  BEGIN
+    UPDATE users
+    SET balance = balance + NEW.amount
+    WHERE id = NEW.user_id;
+
+    SELECT CASE WHEN changes() <> 1
+      THEN RAISE(ABORT, 'deposit user not found')
+    END;
+
+    UPDATE transactions
+    SET credited_at = unixepoch()
+    WHERE id = NEW.id;
+  END
+  """,
+  """
+  CREATE TRIGGER IF NOT EXISTS credit_confirmed_deposit_update
+  AFTER UPDATE OF status ON transactions
+  WHEN NEW.type = 'deposit'
+    AND NEW.status = 'confirmed'
+    AND NEW.credited_at IS NULL
+  BEGIN
+    UPDATE users
+    SET balance = balance + NEW.amount
+    WHERE id = NEW.user_id;
+
+    SELECT CASE WHEN changes() <> 1
+      THEN RAISE(ABORT, 'deposit user not found')
+    END;
+
+    UPDATE transactions
+    SET credited_at = unixepoch()
+    WHERE id = NEW.id;
+  END
+  """,
+  """
+  CREATE TABLE IF NOT EXISTS expenses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    external_id TEXT NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    amount INTEGER NOT NULL CHECK (amount > 0),
+    description TEXT,
+    debited_at INTEGER,
+    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+  )
+  """,
+  """
+  CREATE TRIGGER IF NOT EXISTS debit_confirmed_expense_insert
+  AFTER INSERT ON expenses
+  WHEN NEW.status = 'confirmed'
+    AND NEW.debited_at IS NULL
+  BEGIN
+    UPDATE users
+    SET balance = balance - NEW.amount
+    WHERE id = NEW.user_id
+      AND balance >= NEW.amount;
+
+    SELECT CASE WHEN changes() <> 1
+      THEN RAISE(ABORT, 'expense user not found or insufficient balance')
+    END;
+
+    UPDATE expenses
+    SET debited_at = unixepoch()
+    WHERE id = NEW.id;
+  END
+  """,
+  """
+  CREATE TRIGGER IF NOT EXISTS debit_confirmed_expense_update
+  AFTER UPDATE OF status ON expenses
+  WHEN NEW.status = 'confirmed'
+    AND NEW.debited_at IS NULL
+  BEGIN
+    UPDATE users
+    SET balance = balance - NEW.amount
+    WHERE id = NEW.user_id
+      AND balance >= NEW.amount;
+
+    SELECT CASE WHEN changes() <> 1
+      THEN RAISE(ABORT, 'expense user not found or insufficient balance')
+    END;
+
+    UPDATE expenses
+    SET debited_at = unixepoch()
+    WHERE id = NEW.id;
+  END
+  """
+]
+
+[auth.basic]
+# SQLite uses `?` positional placeholders and unixepoch() for Unix timestamps.
+sql = "SELECT id, password FROM users WHERE email = ?"
+owner = "id"
+password = "password"
+
+[auth.bearer]
+sql = "SELECT user_id FROM sessions WHERE token = ? AND expires_at > unixepoch()"
+owner = "user_id"
+
+[[endpoints]]
+method = "POST"
+path = "/users"
+action = "create_user"
+altcha = true
+
+[[endpoints]]
+method = "GET"
+path = "/users"
+action = "list_users"
+
+[[endpoints]]
+method = "GET"
+path = "/users/{id}"
+action = "get_user"
+
+[[endpoints]]
+method = "POST"
+path = "/tokens"
+action = "create_token"
+auth = ["basic"]
+
+[[endpoints]]
+method = "DELETE"
+path = "/users/{id}"
+action = "delete_user"
+auth = ["basic", "bearer"]
+
+[actions.create_user]
+sql = "INSERT INTO users (name, email, password) VALUES (?, ?, ?) RETURNING id, name, email"
+params = ["name", "email", "password"]
+hash = ["password"]
+result = "one"
+status = 201
+
+[actions.list_users]
+sql = "SELECT id, name, email, balance FROM users ORDER BY id"
+result = "many"
+
+[actions.get_user]
+sql = "SELECT id, name, email, balance FROM users WHERE id = ?"
+params = ["id"]
+result = "one"
+
+[actions.create_token]
+sql = "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, unixepoch() + 86400) RETURNING token"
+params = ["$token", "$owner"]
+result = "one"
+status = 201
+no_store = true
+
+[actions.delete_user]
+sql = "DELETE FROM users WHERE id = ? AND id = ? RETURNING id, name, email"
+params = ["id", "$owner"]
+result = "optional"

@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: read-all
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Format, lint, and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2.9.1
+
+      - name: Run checks
+        run: ./scripts/check.sh
+
+  e2e:
+    name: E2E (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [sqlite, postgres]
+
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - name: Run end-to-end tests
+        run: docker compose run --build --rm e2e-${{ matrix.backend }}
+
+      - name: Stop services
+        if: always()
+        run: docker compose down --volumes
