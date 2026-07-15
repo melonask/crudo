@@ -9,13 +9,13 @@ RUN cargo build --locked --release && mkdir /data
 
 FROM scratch AS runtime
 COPY --from=builder /app/target/release/crudo /usr/local/bin/crudo
-COPY config /app/config
+COPY config/postgres.toml /etc/crudo/config.toml
 COPY --from=builder --chown=10001:10001 /data /data
 USER 10001:10001
 WORKDIR /data
 EXPOSE 3000
 ENTRYPOINT ["/usr/local/bin/crudo"]
-CMD ["--config", "/app/config/sqlite.toml"]
+CMD ["--config", "/etc/crudo/config.toml", "--address", "0.0.0.0:3000"]
 
 FROM build AS e2e-builder
 COPY tests ./tests

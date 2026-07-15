@@ -31,11 +31,13 @@ docker run -d \
 
 until docker exec crudo-postgres pg_isready -U crudo -d crudo; do sleep 1; done
 
+export DATABASE_URL="postgres://crudo:password@crudo-postgres:5432/crudo"
+
 docker run --rm -p 3000:3000 \
   --network crudo \
-  -e DATABASE_URL="postgres://crudo:password@crudo-postgres:5432/crudo" \
-  ghcr.io/melonask/crudo:latest \
-  --config /app/config/postgres.toml
+  -e DATABASE_URL \
+  -v "$PWD/config/postgres.toml:/etc/crudo/config.toml:ro" \
+  ghcr.io/melonask/crudo:latest
 ```
 
 On startup, crudo runs the configured idempotent setup statements before accepting requests.
