@@ -19,17 +19,16 @@ the same command again with `--force`.
 
 ### Homebrew
 
-The repository includes a source formula for the current `main` branch. Add the
-repository as a custom tap, then install its HEAD formula:
+Add the official tap, then install crudo:
 
 ```sh
-brew tap melonask/crudo https://github.com/melonask/crudo
-brew install --HEAD melonask/crudo/crudo
+brew tap melonask/crudo
+brew install crudo
 ```
 
-Run `brew upgrade --fetch-HEAD melonask/crudo/crudo` to update it. Tagged
-releases remain available through crates.io while the project is being prepared
-for a versioned Homebrew tap.
+Alternatively, install it in one command with
+`brew install melonask/crudo/crudo`. Run `brew upgrade crudo` to update an
+existing installation.
 
 ### Docker
 

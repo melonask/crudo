@@ -1,4 +1,5 @@
 /target
+/homebrew-crudo
 .DS_Store
 .env
 .idea/
