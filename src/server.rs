@@ -21,7 +21,7 @@ use axum::{
     extract::{ConnectInfo, DefaultBodyLimit, MatchedPath, Path, Query, State},
     http::{
         HeaderMap, HeaderValue, Method, StatusCode,
-        header::{AUTHORIZATION, CACHE_CONTROL, RETRY_AFTER},
+        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, RETRY_AFTER},
     },
     response::{IntoResponse, Response},
     routing::{MethodFilter, on},
@@ -33,10 +33,13 @@ use serde_json::{Map, Value, json};
 use sha2::Sha256;
 use sqlx::{AnyPool, AssertSqlSafe};
 use tower::limit::ConcurrencyLimitLayer;
-use tower_http::timeout::TimeoutLayer;
+use tower_http::{
+    cors::{AllowOrigin, Any, CorsLayer},
+    timeout::TimeoutLayer,
+};
 
 use crate::{
-    config::{Action, Altcha, AuthMethod, Authentication, Config, ResultMode},
+    config::{Action, Altcha, AuthMethod, Authentication, Config, Cors, ResultMode},
     database::{bind, row_to_json},
 };
 
@@ -168,6 +171,7 @@ pub fn build_router(pool: AnyPool, config: Config) -> Result<Router> {
 
     let default_limits = config.server.limits;
     let prefix = config.server.prefix;
+    let cors = config.server.cors;
     validate_limits(default_limits, "server")?;
     let mut router = Router::new();
     let mut routes = HashMap::new();
@@ -261,7 +265,30 @@ pub fn build_router(pool: AnyPool, config: Config) -> Result<Router> {
             clients: Mutex::new(HashMap::new()),
         },
     });
-    Ok(router.with_state(state))
+    let mut router = router.with_state(state);
+    if let Some(cors) = cors {
+        router = router.layer(cors_layer(cors)?);
+    }
+    Ok(router)
+}
+
+fn cors_layer(cors: Cors) -> Result<CorsLayer> {
+    if cors.origins.is_empty() {
+        bail!("server.cors.origins must contain at least one origin");
+    }
+    let origins = cors
+        .origins
+        .into_iter()
+        .map(|origin| {
+            origin
+                .parse::<HeaderValue>()
+                .with_context(|| format!("invalid CORS origin {origin}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods(Any)
+        .allow_headers([AUTHORIZATION, CONTENT_TYPE]))
 }
 
 fn validate_limits(limits: crate::config::Limits, context: &str) -> Result<()> {

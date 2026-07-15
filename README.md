@@ -19,19 +19,22 @@ brew install melonask/crudo/crudo
 ### Docker
 
 ```sh
+export POSTGRES_DB=crudo
+export POSTGRES_USER=crudo
+export POSTGRES_PASSWORD=password
+export DATABASE_URL="postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@pg:5432/$POSTGRES_DB"
+
 docker network create crudo
 
 docker run -d \
-  --name crudo-postgres \
+  --name pg \
   --network crudo \
-  -e POSTGRES_DB=crudo \
-  -e POSTGRES_USER=crudo \
-  -e POSTGRES_PASSWORD=password \
+  -e POSTGRES_DB \
+  -e POSTGRES_USER \
+  -e POSTGRES_PASSWORD \
   postgres:18.4-alpine3.23
 
-until docker exec crudo-postgres pg_isready -U crudo -d crudo; do sleep 1; done
-
-export DATABASE_URL="postgres://crudo:password@crudo-postgres:5432/crudo"
+until docker exec pg pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"; do sleep 1; done
 
 docker run --rm -p 3000:3000 \
   --network crudo \
@@ -41,6 +44,16 @@ docker run --rm -p 3000:3000 \
 ```
 
 On startup, crudo runs the configured idempotent setup statements before accepting requests.
+
+### Web console
+
+Start the API, then serve the included test console:
+
+```sh
+python -m http.server 8000
+```
+
+Open [http://localhost:8000](http://localhost:8000) to create users, solve ALTCHA challenges, sign in, add deposits, buy goods, inspect balances and activity, or delete an account.
 
 ## Usage
 
@@ -78,6 +91,9 @@ The checked-in TOML files are complete configuration references with comments fo
 [server]
 address = "127.0.0.1:3000"
 prefix = "v1"
+
+[server.cors]
+origins = ["http://127.0.0.1:8000", "http://localhost:8000"]
 
 [server.limits]
 body_bytes = 1048576

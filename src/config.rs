@@ -43,6 +43,7 @@ pub(crate) struct Server {
     pub(crate) prefix: String,
     #[serde(default)]
     pub(crate) limits: Limits,
+    pub(crate) cors: Option<Cors>,
 }
 
 impl Default for Server {
@@ -51,8 +52,14 @@ impl Default for Server {
             address: default_address(),
             prefix: String::new(),
             limits: Limits::default(),
+            cors: None,
         }
     }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct Cors {
+    pub(crate) origins: Vec<String>,
 }
 
 fn default_address() -> String {

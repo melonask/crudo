@@ -4,6 +4,10 @@
 address = "0.0.0.0:3000"
 prefix = "v1"
 
+[server.cors]
+# Origins allowed to use the included browser console. Restrict this list in production.
+origins = ["http://127.0.0.1:8000", "http://localhost:8000"]
+
 [server.limits]
 # Defaults inherited by endpoints unless overridden in `endpoints.limits`.
 body_bytes = 1048576
@@ -152,6 +156,30 @@ path = "/users/{id}"
 action = "delete_user"
 auth = ["basic", "bearer"]
 
+[[endpoints]]
+method = "GET"
+path = "/transactions"
+action = "list_transactions"
+auth = ["bearer"]
+
+[[endpoints]]
+method = "POST"
+path = "/transactions"
+action = "create_deposit"
+auth = ["bearer"]
+
+[[endpoints]]
+method = "GET"
+path = "/expenses"
+action = "list_expenses"
+auth = ["bearer"]
+
+[[endpoints]]
+method = "POST"
+path = "/expenses"
+action = "create_expense"
+auth = ["bearer"]
+
 [actions.create_user]
 sql = "INSERT INTO users (name, email, password) VALUES ($1, $2, $3) RETURNING id, name, email"
 params = ["name", "email", "password"]
@@ -180,3 +208,25 @@ no_store = true
 sql = "DELETE FROM users WHERE id = $1::BIGINT AND id = $2 RETURNING id, name, email"
 params = ["id", "$owner"]
 result = "optional"
+
+[actions.list_transactions]
+sql = "SELECT id, external_id, type, status, amount, credited_at, created_at FROM transactions WHERE user_id = $1 ORDER BY id DESC"
+params = ["$owner"]
+result = "many"
+
+[actions.create_deposit]
+sql = "INSERT INTO transactions (external_id, user_id, type, status, amount) VALUES ($1, $2, 'deposit', 'confirmed', $3::BIGINT) RETURNING id, external_id, type, status, amount, credited_at, created_at"
+params = ["external_id", "$owner", "amount"]
+result = "one"
+status = 201
+
+[actions.list_expenses]
+sql = "SELECT id, external_id, status, amount, description, debited_at, created_at FROM expenses WHERE user_id = $1 ORDER BY id DESC"
+params = ["$owner"]
+result = "many"
+
+[actions.create_expense]
+sql = "INSERT INTO expenses (external_id, user_id, status, amount, description) VALUES ($1, $2, 'confirmed', $3::BIGINT, $4) RETURNING id, external_id, status, amount, description, debited_at, created_at"
+params = ["external_id", "$owner", "amount", "description"]
+result = "one"
+status = 201

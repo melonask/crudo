@@ -5,7 +5,10 @@ use axum::{
     extract::ConnectInfo,
     http::{
         Request, StatusCode,
-        header::{AUTHORIZATION, CACHE_CONTROL},
+        header::{
+            ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_METHOD, AUTHORIZATION,
+            CACHE_CONTROL, ORIGIN,
+        },
     },
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -18,6 +21,9 @@ use tower::ServiceExt;
 const CONFIG: &str = r#"
 [server]
 prefix = "api"
+
+[server.cors]
+origins = ["http://localhost:8000"]
 
 [server.limits]
 requests = 0
@@ -207,6 +213,24 @@ async fn challenge_disables_caching() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers().get(CACHE_CONTROL).unwrap(), "no-store");
+}
+
+#[tokio::test]
+async fn configured_cors_origin_can_preflight_requests() {
+    let mut request = request("OPTIONS", "/api/object", Body::empty());
+    request
+        .headers_mut()
+        .insert(ORIGIN, "http://localhost:8000".parse().unwrap());
+    request
+        .headers_mut()
+        .insert(ACCESS_CONTROL_REQUEST_METHOD, "POST".parse().unwrap());
+    let response = app().await.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(),
+        "http://localhost:8000"
+    );
 }
 
 #[tokio::test]
