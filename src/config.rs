@@ -166,6 +166,15 @@ pub(crate) struct Action {
     #[serde(default)]
     pub(crate) no_store: bool,
     pub(crate) status: Option<u16>,
+    #[serde(default)]
+    pub(crate) errors: Vec<ActionError>,
+}
+
+#[derive(Clone, Deserialize)]
+pub(crate) struct ActionError {
+    pub(crate) database_message: String,
+    pub(crate) status: u16,
+    pub(crate) message: String,
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]

@@ -149,6 +149,15 @@ Result modes are:
 
 SQL uses the native syntax of each database. SQLite uses `?`, while PostgreSQL uses `$1`, `$2`, and so on. Path and query inputs are strings, so PostgreSQL statements must cast them when comparing them with numeric columns, for example `$1::BIGINT`.
 
+Expected database failures can be mapped to safe endpoint responses per action. Messages that are not explicitly mapped remain internal server errors:
+
+```toml
+[[actions.create_expense.errors]]
+database_message = "expense user not found or insufficient balance"
+status = 422
+message = "insufficient balance"
+```
+
 ### Authentication
 
 Basic and Bearer authentication each run configured SQL and resolve an owner:

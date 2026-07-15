@@ -80,6 +80,7 @@ async fn real_http_financial_lifecycle() {
 
     assert_limits(&client, &base).await;
     let user_ids = register_users_and_verify_altcha(&client, &base).await;
+    assert_insufficient_balance_response(&client, &base, &pool, backend, user_ids[0]).await;
     exercise_financial_triggers(&pool, backend, &user_ids).await;
 
     for user_id in user_ids {
@@ -93,6 +94,43 @@ async fn real_http_financial_lifecycle() {
     }
 
     server.abort();
+}
+
+async fn assert_insufficient_balance_response(
+    client: &Client,
+    base: &str,
+    pool: &AnyPool,
+    backend: Backend,
+    user_id: i64,
+) {
+    let sql = if backend == Backend::Sqlite {
+        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, unixepoch() + 60)"
+    } else {
+        "INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, EXTRACT(EPOCH FROM now()) + 60)"
+    };
+    sqlx::query(sql)
+        .bind("insufficient-balance-token")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    let response = client
+        .post(format!("{base}/expenses"))
+        .bearer_auth("insufficient-balance-token")
+        .json(&json!({
+            "external_id": "expense-before-deposit",
+            "amount": 1,
+            "description": "Not funded",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        response.json::<Value>().await.unwrap(),
+        json!({ "error": "insufficient balance" })
+    );
 }
 
 async fn assert_limits(client: &Client, base: &str) {

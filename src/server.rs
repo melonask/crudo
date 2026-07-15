@@ -173,6 +173,16 @@ pub fn build_router(pool: AnyPool, config: Config) -> Result<Router> {
     let prefix = config.server.prefix;
     let cors = config.server.cors;
     validate_limits(default_limits, "server")?;
+    for (name, action) in &config.actions {
+        for error in &action.errors {
+            let status = StatusCode::from_u16(error.status).with_context(|| {
+                format!("action {name} has invalid error status {}", error.status)
+            })?;
+            if !status.is_client_error() && !status.is_server_error() {
+                bail!("action {name} error status must be between 400 and 599");
+            }
+        }
+    }
     let mut router = Router::new();
     let mut routes = HashMap::new();
     let mut uses_altcha = false;
@@ -402,6 +412,23 @@ fn error_response(error: anyhow::Error) -> Response {
     response
 }
 
+fn action_error(error: sqlx::Error, action: &Action) -> anyhow::Error {
+    let response = error.as_database_error().and_then(|database| {
+        action
+            .errors
+            .iter()
+            .find(|response| response.database_message == database.message())
+    });
+    match response {
+        Some(response) => ClientError {
+            status: StatusCode::from_u16(response.status).expect("error status was validated"),
+            message: response.message.clone(),
+        }
+        .into(),
+        None => error.into(),
+    }
+}
+
 async fn altcha_challenge(
     State(state): State<Arc<AppState>>,
     ConnectInfo(address): ConnectInfo<SocketAddr>,
@@ -515,20 +542,30 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
 
     let value = match action.result {
         ResultMode::Execute => {
-            let result = query.execute(&state.pool).await?;
+            let result = query
+                .execute(&state.pool)
+                .await
+                .map_err(|error| action_error(error, action))?;
             json!({ "rows_affected": result.rows_affected() })
         }
-        ResultMode::One => row_to_json(query.fetch_one(&state.pool).await?)?,
+        ResultMode::One => row_to_json(
+            query
+                .fetch_one(&state.pool)
+                .await
+                .map_err(|error| action_error(error, action))?,
+        )?,
         ResultMode::Optional => query
             .fetch_optional(&state.pool)
-            .await?
+            .await
+            .map_err(|error| action_error(error, action))?
             .map(row_to_json)
             .transpose()?
             .unwrap_or(Value::Null),
         ResultMode::Many => Value::Array(
             query
                 .fetch_all(&state.pool)
-                .await?
+                .await
+                .map_err(|error| action_error(error, action))?
                 .into_iter()
                 .map(row_to_json)
                 .collect::<Result<Vec<_>>>()?,

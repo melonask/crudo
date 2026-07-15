@@ -516,16 +516,27 @@ async fn multiple_users_have_independent_deposits_and_expenses() {
     assert!(duplicate.is_err());
     assert_eq!(api_balance(&app, 1).await, 1_400);
 
-    let insufficient = sqlx::query(
-        "INSERT INTO expenses (external_id, user_id, status, amount) \
-         VALUES (?, ?, 'confirmed', ?)",
+    sqlx::query(
+        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, unixepoch() + 60)",
     )
-    .bind("purchase-c")
+    .bind("carol-token")
     .bind(3_i64)
-    .bind(600_i64)
     .execute(&writer)
-    .await;
-    assert!(insufficient.is_err());
+    .await
+    .unwrap();
+    let mut insufficient = request(
+        "POST",
+        "/v1/expenses",
+        Body::from(r#"{"external_id":"purchase-c","amount":600,"description":"Too expensive"}"#),
+    );
+    insufficient
+        .headers_mut()
+        .insert(AUTHORIZATION, "Bearer carol-token".parse().unwrap());
+    let response = app.clone().oneshot(insufficient).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body, json!({ "error": "insufficient balance" }));
     let rejected: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM expenses WHERE external_id = 'purchase-c'")
             .fetch_one(&writer)

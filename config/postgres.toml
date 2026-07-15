@@ -230,3 +230,8 @@ sql = "INSERT INTO expenses (external_id, user_id, status, amount, description) 
 params = ["external_id", "$owner", "amount", "description"]
 result = "one"
 status = 201
+
+[[actions.create_expense.errors]]
+database_message = "expense user not found or insufficient balance"
+status = 422
+message = "insufficient balance"
