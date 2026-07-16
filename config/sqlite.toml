@@ -45,6 +45,18 @@ setup = [
   )
   """,
   """
+  CREATE TABLE IF NOT EXISTS user_addresses (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    profile TEXT NOT NULL,
+    address_index INTEGER NOT NULL,
+    address TEXT NOT NULL,
+    derivation_path TEXT NOT NULL,
+    PRIMARY KEY (user_id, profile, address_index),
+    UNIQUE (profile, address),
+    UNIQUE (user_id, profile, address)
+  )
+  """,
+  """
   CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -56,11 +68,15 @@ setup = [
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     external_id TEXT NOT NULL UNIQUE,
     user_id INTEGER NOT NULL,
+    profile TEXT NOT NULL,
+    address TEXT NOT NULL,
     type TEXT NOT NULL,
     status TEXT NOT NULL,
     amount INTEGER NOT NULL CHECK (amount > 0),
     credited_at INTEGER,
-    created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    FOREIGN KEY (user_id, profile, address)
+      REFERENCES user_addresses(user_id, profile, address)
   )
   """,
   """
@@ -157,6 +173,38 @@ setup = [
   """
 ]
 
+[wallets]
+mnemonic = "${WALLET_MNEMONIC}"
+passphrase = "${WALLET_PASSPHRASE}"
+
+[[wallets.profiles]]
+name = "ethereum-mainnet"
+caip2 = "eip155:1"
+curve = "secp256k1"
+derivation = "bip32"
+path = "m/44'/60'/{user_id}'/0/{address_index}"
+address_format = "evm"
+max_addresses = 5
+
+[[wallets.profiles]]
+name = "solana-mainnet"
+caip2 = "solana:4sGjMW1sUnHzSxGspuhpqLDx6wiyjNtZ"
+curve = "ed25519"
+derivation = "slip10"
+path = "m/44'/501'/{user_id}'/{address_index}'"
+address_format = "base58-public-key"
+max_addresses = 5
+
+[[wallets.profiles]]
+name = "bitcoin-mainnet"
+caip2 = "bip122:000000000019d6689c085ae165831e93"
+curve = "secp256k1"
+derivation = "bip32"
+path = "m/84'/0'/{user_id}'/0/{address_index}"
+address_format = "p2wpkh"
+network = "mainnet"
+max_addresses = 5
+
 [auth.basic]
 # SQLite uses `?` positional placeholders and unixepoch() for Unix timestamps.
 sql = "SELECT id, password FROM users WHERE email = ?"
@@ -202,6 +250,18 @@ action = "list_transactions"
 auth = ["bearer"]
 
 [[endpoints]]
+method = "GET"
+path = "/addresses"
+action = "list_addresses"
+auth = ["bearer"]
+
+[[endpoints]]
+method = "POST"
+path = "/addresses"
+action = "create_address"
+auth = ["bearer"]
+
+[[endpoints]]
 method = "POST"
 path = "/transactions"
 action = "create_deposit"
@@ -226,6 +286,15 @@ hash = ["password"]
 result = "one"
 status = 201
 
+[actions.create_user.wallets]
+profiles = ["ethereum-mainnet", "solana-mainnet", "bitcoin-mainnet"]
+sql = "INSERT INTO user_addresses (user_id, profile, address_index, address, derivation_path) VALUES (?, ?, 0, ?, ?)"
+params = ["$result.id", "$profile.name", "$wallet.address", "$wallet.derivation_path"]
+
+[actions.create_user.wallets.values]
+user_id = "$result.id"
+address_index = "0"
+
 [actions.list_users]
 sql = "SELECT id, name, email, balance FROM users ORDER BY id"
 result = "many"
@@ -248,13 +317,33 @@ params = ["id", "$owner"]
 result = "optional"
 
 [actions.list_transactions]
-sql = "SELECT id, external_id, type, status, amount, credited_at, created_at FROM transactions WHERE user_id = ? ORDER BY id DESC"
+sql = "SELECT id, external_id, profile, address, type, status, amount, credited_at, created_at FROM transactions WHERE user_id = ? ORDER BY id DESC"
 params = ["$owner"]
 result = "many"
 
+[actions.list_addresses]
+sql = "SELECT profile, address_index, address, derivation_path FROM user_addresses WHERE user_id = ? ORDER BY profile, address_index"
+params = ["$owner"]
+result = "many"
+
+[actions.create_address]
+sql = "INSERT INTO user_addresses (user_id, profile, address_index, address, derivation_path) SELECT ?, ?, CASE WHEN COUNT(*) < ? THEN COALESCE(MAX(address_index) + 1, 0) ELSE 0 END, ?, '' FROM user_addresses WHERE user_id = ? AND profile = ? RETURNING user_id, profile, address_index"
+params = ["$owner", "$profile.name", "$profile.max_addresses", "$token", "$owner", "$profile.name"]
+result = "one"
+status = 201
+
+[actions.create_address.wallets]
+profile = "profile"
+sql = "UPDATE user_addresses SET address = ?, derivation_path = ? WHERE user_id = ? AND profile = ? AND address_index = ?"
+params = ["$wallet.address", "$wallet.derivation_path", "$result.user_id", "$profile.name", "$result.address_index"]
+
+[actions.create_address.wallets.values]
+user_id = "$result.user_id"
+address_index = "$result.address_index"
+
 [actions.create_deposit]
-sql = "INSERT INTO transactions (external_id, user_id, type, status, amount) VALUES (?, ?, 'deposit', 'confirmed', ?) RETURNING id, external_id, type, status, amount, credited_at, created_at"
-params = ["external_id", "$owner", "amount"]
+sql = "INSERT INTO transactions (external_id, user_id, profile, address, type, status, amount) VALUES (?, ?, ?, ?, 'deposit', 'confirmed', ?) RETURNING id, external_id, profile, address, type, status, amount, credited_at, created_at"
+params = ["external_id", "$owner", "profile", "address", "amount"]
 result = "one"
 status = 201
 

@@ -3,6 +3,7 @@ mod config;
 mod database;
 mod server;
 mod tls;
+mod wallet;
 
 pub use app::{run, serve};
 pub use config::{Config, load_config};

@@ -99,6 +99,16 @@ mod tests {
             .unwrap()
     }
 
+    fn example_config() -> Config {
+        let source = include_str!("../config/sqlite.toml")
+            .replace(
+                "${WALLET_MNEMONIC}",
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            )
+            .replace("${WALLET_PASSPHRASE}", "");
+        Config::parse(&source).unwrap()
+    }
+
     #[tokio::test]
     async fn database_setup_is_atomic() {
         let config = Config::parse(
@@ -183,7 +193,7 @@ mod tests {
 
     #[tokio::test]
     async fn configured_deposit_triggers_credit_exactly_once() {
-        let config = Config::parse(include_str!("../config/sqlite.toml")).unwrap();
+        let config = example_config();
         let pool = memory_pool().await;
         prepare_database(&pool, &config).await.unwrap();
         sqlx::query("INSERT INTO users (name, email, password) VALUES (?, ?, ?)")
@@ -193,10 +203,22 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::query(
+            "INSERT INTO user_addresses (user_id, profile, address_index, address, derivation_path) \
+             VALUES (?, ?, 0, ?, ?)",
+        )
+        .bind(1_i64)
+        .bind("test")
+        .bind("address-1")
+        .bind("m/0")
+        .execute(&pool)
+        .await
+        .unwrap();
 
         sqlx::query(
-            "INSERT INTO transactions (external_id, user_id, type, status, amount) \
-             VALUES (?, ?, 'deposit', 'confirmed', ?)",
+            "INSERT INTO transactions \
+             (external_id, user_id, profile, address, type, status, amount) \
+             VALUES (?, ?, 'test', 'address-1', 'deposit', 'confirmed', ?)",
         )
         .bind("deposit-1")
         .bind(1_i64)
@@ -214,8 +236,9 @@ mod tests {
         assert!(credited_at.is_some());
 
         let duplicate = sqlx::query(
-            "INSERT INTO transactions (external_id, user_id, type, status, amount) \
-             VALUES (?, ?, 'deposit', 'confirmed', ?)",
+            "INSERT INTO transactions \
+             (external_id, user_id, profile, address, type, status, amount) \
+             VALUES (?, ?, 'test', 'address-1', 'deposit', 'confirmed', ?)",
         )
         .bind("deposit-1")
         .bind(1_i64)
@@ -226,8 +249,9 @@ mod tests {
         assert_eq!(balance(&pool).await, 500);
 
         sqlx::query(
-            "INSERT INTO transactions (external_id, user_id, type, status, amount) \
-             VALUES (?, ?, 'deposit', 'pending', ?)",
+            "INSERT INTO transactions \
+             (external_id, user_id, profile, address, type, status, amount) \
+             VALUES (?, ?, 'test', 'address-1', 'deposit', 'pending', ?)",
         )
         .bind("deposit-2")
         .bind(1_i64)
@@ -259,13 +283,14 @@ mod tests {
 
     #[tokio::test]
     async fn configured_deposit_trigger_rolls_back_unknown_user() {
-        let config = Config::parse(include_str!("../config/sqlite.toml")).unwrap();
+        let config = example_config();
         let pool = memory_pool().await;
         prepare_database(&pool, &config).await.unwrap();
 
         let result = sqlx::query(
-            "INSERT INTO transactions (external_id, user_id, type, status, amount) \
-             VALUES (?, ?, 'deposit', 'confirmed', ?)",
+            "INSERT INTO transactions \
+             (external_id, user_id, profile, address, type, status, amount) \
+             VALUES (?, ?, 'test', 'missing', 'deposit', 'confirmed', ?)",
         )
         .bind("unknown-user")
         .bind(999_i64)

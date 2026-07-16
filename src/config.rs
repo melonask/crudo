@@ -15,6 +15,7 @@ pub struct Config {
     #[serde(default)]
     pub(crate) auth: Authentication,
     pub(crate) altcha: Option<Altcha>,
+    pub(crate) wallets: Option<Wallets>,
 }
 
 impl Config {
@@ -168,6 +169,72 @@ pub(crate) struct Action {
     pub(crate) status: Option<u16>,
     #[serde(default)]
     pub(crate) errors: Vec<ActionError>,
+    pub(crate) wallets: Option<ActionWallets>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ActionWallets {
+    #[serde(default)]
+    pub(crate) profiles: Vec<String>,
+    pub(crate) profile: Option<String>,
+    pub(crate) values: HashMap<String, String>,
+    pub(crate) sql: String,
+    pub(crate) params: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Wallets {
+    pub(crate) mnemonic: String,
+    #[serde(default)]
+    pub(crate) passphrase: String,
+    #[serde(default)]
+    pub(crate) profiles: Vec<WalletProfile>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WalletProfile {
+    pub(crate) name: String,
+    pub(crate) caip2: String,
+    pub(crate) curve: WalletCurve,
+    pub(crate) derivation: WalletDerivation,
+    pub(crate) path: String,
+    pub(crate) address_format: WalletAddressFormat,
+    pub(crate) network: Option<BitcoinNetwork>,
+    pub(crate) max_addresses: u32,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum WalletCurve {
+    Secp256k1,
+    Ed25519,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum WalletDerivation {
+    Bip32,
+    Slip10,
+}
+
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum WalletAddressFormat {
+    Evm,
+    Base58PublicKey,
+    P2wpkh,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum BitcoinNetwork {
+    Mainnet,
+    Testnet,
+    Signet,
+    Regtest,
 }
 
 #[derive(Clone, Deserialize)]
@@ -177,7 +244,7 @@ pub(crate) struct ActionError {
     pub(crate) message: String,
 }
 
-#[derive(Clone, Copy, Default, Deserialize)]
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ResultMode {
     #[default]

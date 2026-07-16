@@ -15,7 +15,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use crudo::{Config, build_router, connect, prepare_database};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use sqlx::{AnyPool, any::AnyPoolOptions};
+use sqlx::{AnyPool, Row, any::AnyPoolOptions};
 use tower::ServiceExt;
 
 const CONFIG: &str = r#"
@@ -153,6 +153,65 @@ no_store = true
 sql = "DELETE FROM users WHERE id = ? AND id = ? RETURNING id"
 params = ["id", "$owner"]
 result = "optional"
+"#;
+
+const WALLET_CONFIG: &str = r#"
+[server.limits]
+requests = 0
+
+[database]
+url = "sqlite::memory:"
+
+[wallets]
+mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+
+[[wallets.profiles]]
+name = "ethereum-mainnet"
+caip2 = "eip155:1"
+curve = "secp256k1"
+derivation = "bip32"
+path = "m/44'/60'/{user_id}'/0/{address_index}"
+address_format = "evm"
+max_addresses = 2
+
+[[wallets.profiles]]
+name = "solana-mainnet"
+caip2 = "solana:mainnet"
+curve = "ed25519"
+derivation = "slip10"
+path = "m/44'/501'/{user_id}'/{address_index}'"
+address_format = "base58-public-key"
+max_addresses = 2
+
+[[wallets.profiles]]
+name = "bitcoin-mainnet"
+caip2 = "bip122:mainnet"
+curve = "secp256k1"
+derivation = "bip32"
+path = "m/84'/0'/{user_id}'/0/{address_index}"
+address_format = "p2wpkh"
+network = "mainnet"
+max_addresses = 2
+
+[[endpoints]]
+method = "POST"
+path = "/users"
+action = "create_user"
+
+[actions.create_user]
+sql = "INSERT INTO users (email) VALUES (?) RETURNING id, email"
+params = ["email"]
+result = "one"
+status = 201
+
+[actions.create_user.wallets]
+profiles = ["ethereum-mainnet", "solana-mainnet", "bitcoin-mainnet"]
+sql = "INSERT INTO user_addresses (user_id, profile, address_index, address, derivation_path) VALUES (?, ?, 0, ?, ?)"
+params = ["$result.id", "$profile.name", "$wallet.address", "$wallet.derivation_path"]
+
+[actions.create_user.wallets.values]
+user_id = "$result.id"
+address_index = "0"
 "#;
 
 async fn app() -> axum::Router {
@@ -349,8 +408,7 @@ async fn external_deposits_update_the_balance_exposed_by_the_api() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("integration.db");
     let database_url = format!("sqlite://{}?mode=rwc", database.display());
-    let source =
-        include_str!("../config/sqlite.toml").replace("sqlite://crudo.db?mode=rwc", &database_url);
+    let source = example_sqlite_config(&database_url);
     let config = Config::parse(&source).unwrap();
     let api_pool = connect(&config).await.unwrap();
     prepare_database(&api_pool, &config).await.unwrap();
@@ -361,6 +419,16 @@ async fn external_deposits_update_the_balance_exposed_by_the_api() {
         .execute(&api_pool)
         .await
         .unwrap();
+    sqlx::query(
+        "INSERT INTO user_addresses (user_id, profile, address_index, address, derivation_path) VALUES (?, ?, 0, ?, ?)",
+    )
+    .bind(1_i64)
+    .bind("test")
+    .bind("address-1")
+    .bind("m/1")
+    .execute(&api_pool)
+    .await
+    .unwrap();
     let app = build_router(api_pool, config).unwrap();
 
     let writer = AnyPoolOptions::new()
@@ -369,8 +437,8 @@ async fn external_deposits_update_the_balance_exposed_by_the_api() {
         .await
         .unwrap();
     sqlx::query(
-        "INSERT INTO transactions (external_id, user_id, type, status, amount) \
-         VALUES (?, ?, 'deposit', 'confirmed', ?)",
+        "INSERT INTO transactions (external_id, user_id, profile, address, type, status, amount) \
+         VALUES (?, ?, 'test', 'address-1', 'deposit', 'confirmed', ?)",
     )
     .bind("provider-1")
     .bind(1_i64)
@@ -379,8 +447,8 @@ async fn external_deposits_update_the_balance_exposed_by_the_api() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO transactions (external_id, user_id, type, status, amount) \
-         VALUES (?, ?, 'deposit', 'pending', ?)",
+        "INSERT INTO transactions (external_id, user_id, profile, address, type, status, amount) \
+         VALUES (?, ?, 'test', 'address-1', 'deposit', 'pending', ?)",
     )
     .bind("provider-2")
     .bind(1_i64)
@@ -399,8 +467,8 @@ async fn external_deposits_update_the_balance_exposed_by_the_api() {
     assert_eq!(api_balance(&app, 1).await, 2_000);
 
     let duplicate = sqlx::query(
-        "INSERT INTO transactions (external_id, user_id, type, status, amount) \
-         VALUES (?, ?, 'deposit', 'confirmed', ?)",
+        "INSERT INTO transactions (external_id, user_id, profile, address, type, status, amount) \
+         VALUES (?, ?, 'test', 'address-1', 'deposit', 'confirmed', ?)",
     )
     .bind("provider-1")
     .bind(1_i64)
@@ -416,8 +484,7 @@ async fn multiple_users_have_independent_deposits_and_expenses() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("expenses.db");
     let database_url = format!("sqlite://{}?mode=rwc", database.display());
-    let source =
-        include_str!("../config/sqlite.toml").replace("sqlite://crudo.db?mode=rwc", &database_url);
+    let source = example_sqlite_config(&database_url);
     let config = Config::parse(&source).unwrap();
     let api_pool = connect(&config).await.unwrap();
     prepare_database(&api_pool, &config).await.unwrap();
@@ -434,6 +501,18 @@ async fn multiple_users_have_independent_deposits_and_expenses() {
             .await
             .unwrap();
     }
+    for user_id in 1_i64..=3 {
+        sqlx::query(
+            "INSERT INTO user_addresses (user_id, profile, address_index, address, derivation_path) VALUES (?, ?, 0, ?, ?)",
+        )
+        .bind(user_id)
+        .bind("test")
+        .bind(format!("address-{user_id}"))
+        .bind(format!("m/{user_id}"))
+        .execute(&api_pool)
+        .await
+        .unwrap();
+    }
     let app = build_router(api_pool, config).unwrap();
     let writer = AnyPoolOptions::new()
         .max_connections(1)
@@ -447,11 +526,12 @@ async fn multiple_users_have_independent_deposits_and_expenses() {
         ("deposit-c", 3, 500),
     ] {
         sqlx::query(
-            "INSERT INTO transactions (external_id, user_id, type, status, amount) \
-             VALUES (?, ?, 'deposit', 'confirmed', ?)",
+            "INSERT INTO transactions (external_id, user_id, profile, address, type, status, amount) \
+             VALUES (?, ?, 'test', ?, 'deposit', 'confirmed', ?)",
         )
         .bind(external_id)
         .bind(user_id)
+        .bind(format!("address-{user_id}"))
         .bind(amount)
         .execute(&writer)
         .await
@@ -560,6 +640,106 @@ async fn api_balance(app: &axum::Router, user_id: i64) -> i64 {
     let body: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     body["balance"].as_i64().unwrap()
+}
+
+fn example_sqlite_config(database_url: &str) -> String {
+    include_str!("../config/sqlite.toml")
+        .replace("sqlite://crudo.db?mode=rwc", database_url)
+        .replace(
+            "${WALLET_MNEMONIC}",
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .replace("${WALLET_PASSPHRASE}", "")
+}
+
+#[tokio::test]
+async fn registration_atomically_assigns_every_configured_wallet_profile() {
+    sqlx::any::install_default_drivers();
+    let pool = AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE);
+         CREATE TABLE user_addresses (
+           user_id INTEGER NOT NULL,
+           profile TEXT NOT NULL,
+           address_index INTEGER NOT NULL,
+           address TEXT NOT NULL,
+           derivation_path TEXT NOT NULL,
+           PRIMARY KEY (user_id, profile, address_index),
+           UNIQUE (profile, address)
+         );",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let app = build_router(pool.clone(), Config::parse(WALLET_CONFIG).unwrap()).unwrap();
+
+    for email in ["first@example.com", "second@example.com"] {
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/users",
+                Body::from(json!({ "email": email }).to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    let rows = sqlx::query(
+        "SELECT user_id, profile, address, derivation_path FROM user_addresses ORDER BY user_id, profile",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 6);
+    assert_eq!(rows[0].get::<i64, _>("user_id"), 1);
+    assert_eq!(rows[0].get::<String, _>("profile"), "bitcoin-mainnet");
+    assert!(rows[1].get::<String, _>("address").starts_with("0x"));
+    assert_eq!(
+        rows[1].get::<String, _>("derivation_path"),
+        "m/44'/60'/1'/0/0"
+    );
+    assert_ne!(
+        rows[1].get::<String, _>("address"),
+        rows[4].get::<String, _>("address")
+    );
+}
+
+#[tokio::test]
+async fn wallet_persistence_failure_rolls_back_registration() {
+    sqlx::any::install_default_drivers();
+    let pool = AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let source = WALLET_CONFIG.replace("INSERT INTO user_addresses", "INSERT INTO missing_table");
+    let app = build_router(pool.clone(), Config::parse(&source).unwrap()).unwrap();
+
+    let response = app
+        .oneshot(request(
+            "POST",
+            "/users",
+            Body::from(r#"{"email":"rollback@example.com"}"#),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(users, 0);
 }
 
 #[tokio::test]

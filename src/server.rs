@@ -41,6 +41,7 @@ use tower_http::{
 use crate::{
     config::{Action, Altcha, AuthMethod, Authentication, Config, Cors, ResultMode},
     database::{bind, row_to_json},
+    wallet::{WalletGenerator, path_placeholders},
 };
 
 struct Route {
@@ -68,6 +69,7 @@ struct AppState {
     routes: HashMap<(Method, String), Route>,
     auth: Authentication,
     altcha: Option<Altcha>,
+    wallets: Option<WalletGenerator>,
     used_challenges: Mutex<HashMap<String, u64>>,
     challenge_rate_limit: RateLimit,
 }
@@ -169,6 +171,7 @@ pub fn build_router(pool: AnyPool, config: Config) -> Result<Router> {
         bail!("no endpoints configured");
     }
 
+    let wallets = config.wallets.map(WalletGenerator::new).transpose()?;
     let default_limits = config.server.limits;
     let prefix = config.server.prefix;
     let cors = config.server.cors;
@@ -180,6 +183,66 @@ pub fn build_router(pool: AnyPool, config: Config) -> Result<Router> {
             })?;
             if !status.is_client_error() && !status.is_server_error() {
                 bail!("action {name} error status must be between 400 and 599");
+            }
+        }
+        if let Some(stage) = &action.wallets {
+            if action.result != ResultMode::One {
+                bail!("action {name} with wallets must use result = \"one\"");
+            }
+            let generator = wallets.as_ref().with_context(|| {
+                format!("action {name} uses wallets, but [wallets] is not configured")
+            })?;
+            if stage.profiles.is_empty() == stage.profile.is_none() {
+                bail!(
+                    "action {name} wallets must configure either profiles or profile, but not both"
+                );
+            }
+            let mut seen = std::collections::HashSet::new();
+            for profile in &stage.profiles {
+                if generator.profile(profile).is_none() {
+                    bail!("action {name} references unknown wallet profile {profile}");
+                }
+                if !seen.insert(profile) {
+                    bail!("action {name} repeats wallet profile {profile}");
+                }
+            }
+            if stage.profile.as_ref().is_some_and(String::is_empty) {
+                bail!("action {name} wallet profile input must not be empty");
+            }
+            let profiles: Vec<_> = if stage.profile.is_some() {
+                generator.profiles().collect()
+            } else {
+                stage
+                    .profiles
+                    .iter()
+                    .map(|profile| generator.profile(profile).expect("profile was validated"))
+                    .collect()
+            };
+            for profile in profiles {
+                let placeholders = path_placeholders(&profile.path)?;
+                if placeholders.len() != stage.values.len()
+                    || placeholders
+                        .iter()
+                        .any(|placeholder| !stage.values.contains_key(placeholder))
+                {
+                    bail!(
+                        "action {name} wallet values do not match profile {} path placeholders",
+                        profile.name
+                    );
+                }
+            }
+            for expression in stage.values.values() {
+                if expression.parse::<u32>().is_err()
+                    && expression
+                        .strip_prefix("$result.")
+                        .is_none_or(str::is_empty)
+                {
+                    bail!("action {name} has invalid wallet path value {expression}");
+                }
+            }
+            for parameter in &stage.params {
+                validate_wallet_parameter(parameter)
+                    .with_context(|| format!("action {name} has invalid wallet parameter"))?;
             }
         }
     }
@@ -268,6 +331,7 @@ pub fn build_router(pool: AnyPool, config: Config) -> Result<Router> {
         routes,
         auth: config.auth,
         altcha: config.altcha,
+        wallets,
         used_challenges: Mutex::new(HashMap::new()),
         challenge_rate_limit: RateLimit {
             requests: default_limits.requests,
@@ -280,6 +344,24 @@ pub fn build_router(pool: AnyPool, config: Config) -> Result<Router> {
         router = router.layer(cors_layer(cors)?);
     }
     Ok(router)
+}
+
+fn validate_wallet_parameter(parameter: &str) -> Result<()> {
+    match parameter {
+        "$profile.name"
+        | "$profile.caip2"
+        | "$profile.max_addresses"
+        | "$wallet.address"
+        | "$wallet.derivation_path" => Ok(()),
+        value
+            if value
+                .strip_prefix("$result.")
+                .is_some_and(|column| !column.is_empty()) =>
+        {
+            Ok(())
+        }
+        _ => bail!("unsupported parameter {parameter}"),
+    }
 }
 
 fn cors_layer(cors: Cors) -> Result<CorsLayer> {
@@ -520,6 +602,33 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
             Value::String(SaltString::generate(&mut OsRng).to_string()),
         );
     }
+    let selected_profile = if let Some(field) = action
+        .wallets
+        .as_ref()
+        .and_then(|wallets| wallets.profile.as_ref())
+    {
+        let name = input
+            .get(field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| ClientError::bad_request(format!("{field} must be a string")))?;
+        let profile = state
+            .wallets
+            .as_ref()
+            .and_then(|wallets| wallets.profile(name))
+            .ok_or_else(|| ClientError::bad_request(format!("unknown wallet profile {name}")))?;
+        input.insert("$profile.name".into(), Value::String(profile.name.clone()));
+        input.insert(
+            "$profile.caip2".into(),
+            Value::String(profile.caip2.clone()),
+        );
+        input.insert(
+            "$profile.max_addresses".into(),
+            Value::Number(profile.max_addresses.into()),
+        );
+        Some(profile)
+    } else {
+        None
+    };
     for name in &action.hash {
         let password = input
             .get(name)
@@ -540,36 +649,93 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
         query = bind(query, value)?;
     }
 
-    let value = match action.result {
-        ResultMode::Execute => {
-            let result = query
-                .execute(&state.pool)
-                .await
-                .map_err(|error| action_error(error, action))?;
-            json!({ "rows_affected": result.rows_affected() })
-        }
-        ResultMode::One => row_to_json(
+    let value = if let Some(wallets) = &action.wallets {
+        let generator = state
+            .wallets
+            .as_ref()
+            .context("wallet generator is not configured")?;
+        let mut transaction = state
+            .pool
+            .begin()
+            .await
+            .context("could not start wallet action transaction")?;
+        let value = row_to_json(
             query
-                .fetch_one(&state.pool)
+                .fetch_one(&mut *transaction)
                 .await
                 .map_err(|error| action_error(error, action))?,
-        )?,
-        ResultMode::Optional => query
-            .fetch_optional(&state.pool)
+        )?;
+        let path_values = wallet_path_values(&wallets.values, &value)?;
+        let profiles: Vec<_> = if let Some(profile) = selected_profile {
+            vec![profile]
+        } else {
+            wallets
+                .profiles
+                .iter()
+                .map(|name| {
+                    generator
+                        .profile(name)
+                        .context("validated wallet profile is missing")
+                })
+                .collect::<Result<_>>()?
+        };
+
+        for profile in profiles {
+            let generated = generator.derive(profile, &path_values)?;
+            let values = wallets
+                .params
+                .iter()
+                .map(|parameter| wallet_parameter(parameter, &value, profile, &generated))
+                .collect::<Result<Vec<_>>>()?;
+            let mut insert = sqlx::query(AssertSqlSafe(wallets.sql.as_str()));
+            for value in &values {
+                insert = bind(insert, value)?;
+            }
+            let result = insert
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| action_error(error, action))?;
+            if result.rows_affected() != 1 {
+                bail!("wallet persistence must affect exactly one row");
+            }
+        }
+        transaction
+            .commit()
             .await
-            .map_err(|error| action_error(error, action))?
-            .map(row_to_json)
-            .transpose()?
-            .unwrap_or(Value::Null),
-        ResultMode::Many => Value::Array(
-            query
-                .fetch_all(&state.pool)
+            .context("could not commit wallet action transaction")?;
+        value
+    } else {
+        match action.result {
+            ResultMode::Execute => {
+                let result = query
+                    .execute(&state.pool)
+                    .await
+                    .map_err(|error| action_error(error, action))?;
+                json!({ "rows_affected": result.rows_affected() })
+            }
+            ResultMode::One => row_to_json(
+                query
+                    .fetch_one(&state.pool)
+                    .await
+                    .map_err(|error| action_error(error, action))?,
+            )?,
+            ResultMode::Optional => query
+                .fetch_optional(&state.pool)
                 .await
                 .map_err(|error| action_error(error, action))?
-                .into_iter()
                 .map(row_to_json)
-                .collect::<Result<Vec<_>>>()?,
-        ),
+                .transpose()?
+                .unwrap_or(Value::Null),
+            ResultMode::Many => Value::Array(
+                query
+                    .fetch_all(&state.pool)
+                    .await
+                    .map_err(|error| action_error(error, action))?
+                    .into_iter()
+                    .map(row_to_json)
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+        }
     };
     let status = action
         .status
@@ -583,6 +749,57 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
             .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
     Ok(response)
+}
+
+fn wallet_path_values(
+    expressions: &HashMap<String, String>,
+    result: &Value,
+) -> Result<HashMap<String, u32>> {
+    expressions
+        .iter()
+        .map(|(name, expression)| {
+            let value = if expression.starts_with("$result.") {
+                result_value(result, expression)?
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .with_context(|| {
+                        format!("wallet path value {name} must be an unsigned integer")
+                    })?
+            } else {
+                expression.parse::<u32>()?
+            };
+            if value >= 1 << 31 {
+                bail!("wallet path value {name} must be less than 2^31");
+            }
+            Ok((name.clone(), value))
+        })
+        .collect()
+}
+
+fn result_value<'a>(result: &'a Value, reference: &str) -> Result<&'a Value> {
+    let column = reference
+        .strip_prefix("$result.")
+        .context("result reference must start with $result.")?;
+    result
+        .get(column)
+        .with_context(|| format!("action result has no column {column}"))
+}
+
+fn wallet_parameter(
+    parameter: &str,
+    result: &Value,
+    profile: &crate::config::WalletProfile,
+    generated: &crate::wallet::GeneratedAddress,
+) -> Result<Value> {
+    Ok(match parameter {
+        "$profile.name" => Value::String(profile.name.clone()),
+        "$profile.caip2" => Value::String(profile.caip2.clone()),
+        "$profile.max_addresses" => Value::Number(profile.max_addresses.into()),
+        "$wallet.address" => Value::String(generated.address.clone()),
+        "$wallet.derivation_path" => Value::String(generated.derivation_path.clone()),
+        parameter if parameter.starts_with("$result.") => result_value(result, parameter)?.clone(),
+        _ => bail!("unsupported wallet parameter {parameter}"),
+    })
 }
 
 fn verify_altcha(state: &AppState, encoded: Option<String>, ip: IpAddr) -> Result<()> {
@@ -750,6 +967,7 @@ mod tests {
             routes: HashMap::new(),
             auth: Authentication::default(),
             altcha: Some(altcha),
+            wallets: None,
             used_challenges: Mutex::new(HashMap::new()),
             challenge_rate_limit: RateLimit {
                 requests: 0,

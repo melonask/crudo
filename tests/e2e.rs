@@ -5,7 +5,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use crudo::{Config, build_router, connect, prepare_database, serve};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
-use sqlx::{AnyPool, AssertSqlSafe};
+use sqlx::{AnyPool, AssertSqlSafe, Row};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Backend {
@@ -35,7 +35,12 @@ impl Backend {
             .replace("algorithm = \"PBKDF2/SHA-256\"", "algorithm = \"SHA-256\"")
             .replace("cost = 5000", "cost = 1")
             .replace("max_number = 10000", "max_number = 1")
-            .replace("requests = 120", "requests = 0");
+            .replace("requests = 120", "requests = 0")
+            .replace(
+                "${WALLET_MNEMONIC}",
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            )
+            .replace("${WALLET_PASSPHRASE}", "");
         let placeholder = if self == Self::Sqlite { "?" } else { "$1" };
         format!(
             r#"{source}
@@ -80,7 +85,9 @@ async fn real_http_financial_lifecycle() {
 
     assert_limits(&client, &base).await;
     let user_ids = register_users_and_verify_altcha(&client, &base).await;
+    assert_assigned_addresses(&pool, backend, &user_ids).await;
     assert_insufficient_balance_response(&client, &base, &pool, backend, user_ids[0]).await;
+    assert_deposits_require_assigned_addresses(&client, &base, &pool, backend, user_ids[0]).await;
     exercise_financial_triggers(&pool, backend, &user_ids).await;
 
     for user_id in user_ids {
@@ -94,6 +101,152 @@ async fn real_http_financial_lifecycle() {
     }
 
     server.abort();
+}
+
+async fn assert_deposits_require_assigned_addresses(
+    client: &Client,
+    base: &str,
+    pool: &AnyPool,
+    backend: Backend,
+    user_id: i64,
+) {
+    let sql = if backend == Backend::Sqlite {
+        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, unixepoch() + 60)"
+    } else {
+        "INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, EXTRACT(EPOCH FROM now()) + 60)"
+    };
+    sqlx::query(sql)
+        .bind("address-deposit-token")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    let addresses = client
+        .get(format!("{base}/addresses"))
+        .bearer_auth("address-deposit-token")
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<Value>>()
+        .await
+        .unwrap();
+    assert_eq!(addresses.len(), 3);
+    let destination = &addresses[0];
+    let profile = destination["profile"].clone();
+
+    let unknown = client
+        .post(format!("{base}/addresses"))
+        .bearer_auth("address-deposit-token")
+        .json(&json!({ "profile": "unknown-chain" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+
+    let mut tasks = Vec::new();
+    for _ in 1..5 {
+        let client = client.clone();
+        let url = format!("{base}/addresses");
+        let profile = profile.clone();
+        tasks.push(tokio::spawn(async move {
+            client
+                .post(url)
+                .bearer_auth("address-deposit-token")
+                .json(&json!({ "profile": profile }))
+                .send()
+                .await
+                .unwrap()
+        }));
+    }
+    let mut indices = Vec::new();
+    for task in tasks {
+        let generated = task.await.unwrap();
+        assert_eq!(generated.status(), StatusCode::CREATED);
+        indices.push(
+            generated.json::<Value>().await.unwrap()["address_index"]
+                .as_i64()
+                .unwrap(),
+        );
+    }
+    indices.sort_unstable();
+    assert_eq!(indices, [1, 2, 3, 4]);
+    let limited = client
+        .post(format!("{base}/addresses"))
+        .bearer_auth("address-deposit-token")
+        .json(&json!({ "profile": profile }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(limited.status(), StatusCode::CONFLICT);
+
+    let rejected = client
+        .post(format!("{base}/transactions"))
+        .bearer_auth("address-deposit-token")
+        .json(&json!({
+            "external_id": "wrong-address",
+            "profile": profile,
+            "address": "not-assigned",
+            "amount": 1,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::CONFLICT);
+
+    let accepted = client
+        .post(format!("{base}/transactions"))
+        .bearer_auth("address-deposit-token")
+        .json(&json!({
+            "external_id": "assigned-address",
+            "profile": profile,
+            "address": destination["address"],
+            "amount": 1,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::CREATED);
+
+    let spent = client
+        .post(format!("{base}/expenses"))
+        .bearer_auth("address-deposit-token")
+        .json(&json!({
+            "external_id": "spend-addressed-deposit",
+            "amount": 1,
+            "description": "Deposit test offset",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(spent.status(), StatusCode::CREATED);
+}
+
+async fn assert_assigned_addresses(pool: &AnyPool, backend: Backend, users: &[i64]) {
+    let placeholder = if backend == Backend::Sqlite {
+        "?"
+    } else {
+        "$1"
+    };
+    for user_id in users {
+        let sql = format!(
+            "SELECT profile, address, derivation_path FROM user_addresses WHERE user_id = {placeholder} ORDER BY profile"
+        );
+        let rows = sqlx::query(AssertSqlSafe(sql))
+            .bind(user_id)
+            .fetch_all(pool)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        for row in rows {
+            let profile: String = row.get("profile");
+            let address: String = row.get("address");
+            let path: String = row.get("derivation_path");
+            assert!(!profile.is_empty());
+            assert!(!address.is_empty());
+            assert!(path.contains(&user_id.to_string()));
+        }
+    }
 }
 
 async fn assert_insufficient_balance_response(
@@ -302,9 +455,9 @@ async fn exercise_financial_triggers(pool: &AnyPool, backend: Backend, users: &[
 
 async fn reset_database(pool: &AnyPool, backend: Backend) {
     let sql = if backend == Backend::Sqlite {
-        "DELETE FROM expenses; DELETE FROM transactions; DELETE FROM sessions; DELETE FROM users;"
+        "DELETE FROM expenses; DELETE FROM transactions; DELETE FROM sessions; DELETE FROM user_addresses; DELETE FROM users;"
     } else {
-        "TRUNCATE expenses, transactions, sessions, users RESTART IDENTITY CASCADE"
+        "TRUNCATE expenses, transactions, sessions, wallet_counters, user_addresses, users RESTART IDENTITY CASCADE"
     };
     sqlx::raw_sql(sql).execute(pool).await.unwrap();
 }
@@ -317,14 +470,27 @@ async fn insert_deposit(
     status: &str,
     amount: i64,
 ) -> Result<(), sqlx::Error> {
-    let sql = if backend == Backend::Sqlite {
-        "INSERT INTO transactions (external_id, user_id, type, status, amount) VALUES (?, ?, 'deposit', ?, ?)"
+    let address_sql = if backend == Backend::Sqlite {
+        "SELECT profile, address FROM user_addresses WHERE user_id = ? ORDER BY profile LIMIT 1"
     } else {
-        "INSERT INTO transactions (external_id, user_id, type, status, amount) VALUES ($1, $2, 'deposit', $3, $4)"
+        "SELECT profile, address FROM user_addresses WHERE user_id = $1 ORDER BY profile LIMIT 1"
+    };
+    let destination = sqlx::query(address_sql)
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+    let profile: String = destination.get("profile");
+    let address: String = destination.get("address");
+    let sql = if backend == Backend::Sqlite {
+        "INSERT INTO transactions (external_id, user_id, profile, address, type, status, amount) VALUES (?, ?, ?, ?, 'deposit', ?, ?)"
+    } else {
+        "INSERT INTO transactions (external_id, user_id, profile, address, type, status, amount) VALUES ($1, $2, $3, $4, 'deposit', $5, $6)"
     };
     sqlx::query(sql)
         .bind(external_id)
         .bind(user_id)
+        .bind(profile)
+        .bind(address)
         .bind(status)
         .bind(amount)
         .execute(pool)

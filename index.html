@@ -20,7 +20,7 @@
 
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    button, input { font: inherit; }
+    button, input, select { font: inherit; }
     button { cursor: pointer; }
     svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
@@ -46,8 +46,8 @@
 
     form { display: grid; gap: 11px; }
     label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
-    input { width: 100%; padding: 10px 11px; border: 1px solid var(--line); border-radius: 10px; outline: 0; background: #0e1113; color: var(--text); transition: border-color .15s, box-shadow .15s; }
-    input:focus { border-color: #566438; box-shadow: 0 0 0 3px #202719; }
+    input, select { width: 100%; padding: 10px 11px; border: 1px solid var(--line); border-radius: 10px; outline: 0; background: #0e1113; color: var(--text); transition: border-color .15s, box-shadow .15s; }
+    input:focus, select:focus { border-color: #566438; box-shadow: 0 0 0 3px #202719; }
     .button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; padding: 9px 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); color: var(--text); font-weight: 650; transition: transform .15s, border-color .15s, background .15s; }
     .button:hover { border-color: #465059; background: #1d2227; }
     .button:active { transform: translateY(1px); }
@@ -75,6 +75,12 @@
     .action-card { padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: #101315; }
     .action-card h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 13px; font-size: 14px; }
     .action-card h3 svg { color: var(--muted); }
+    .address-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .address-card { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: #101315; }
+    .address-profile { margin-bottom: 8px; color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+    .address-value { overflow: hidden; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+    .address-path { margin-top: 7px; color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .address-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-bottom: 14px; }
 
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; }
@@ -105,6 +111,7 @@
       .metrics { grid-template-columns: 1fr; }
       .metric { min-height: 96px; }
       .money-grid { grid-template-columns: 1fr; }
+      .address-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -179,13 +186,18 @@
           <div class="panel-body money-grid">
             <div class="action-card">
               <h3><svg><use href="#i-plus"/></svg>Add deposit</h3>
-              <form id="depositForm"><label>Amount<input name="amount" type="number" min="1" step="1" value="100" required></label><button class="button primary" type="submit">Confirm deposit</button></form>
+              <form id="depositForm"><label>Destination<select name="destination" id="depositAddress" required></select></label><label>Amount<input name="amount" type="number" min="1" step="1" value="100" required></label><button class="button primary" type="submit">Simulate transfer</button></form>
             </div>
             <div class="action-card">
               <h3><svg><use href="#i-bag"/></svg>Buy goods</h3>
               <form id="expenseForm"><label>Description<input name="description" value="Coffee" required></label><label>Amount<input name="amount" type="number" min="1" step="1" value="25" required></label><button class="button" type="submit">Confirm purchase</button></form>
             </div>
           </div>
+        </section>
+
+        <section class="panel hidden" id="addressesPanel">
+          <div class="panel-head"><div class="panel-title"><svg><use href="#i-wallet"/></svg>Deposit addresses</div></div>
+          <div class="panel-body"><form class="address-actions" id="addressForm"><input name="profile" list="walletProfiles" aria-label="Blockchain profile" placeholder="Profile name" required><datalist id="walletProfiles"></datalist><button class="button" type="submit">Generate another</button></form><div class="address-grid" id="addressGrid"></div></div>
         </section>
 
         <section class="panel">
@@ -210,6 +222,7 @@
       currentUser: null,
       users: [],
       activity: [],
+      addresses: [],
     };
 
     const base = () => $("#apiBase").value.replace(/\/$/, "");
@@ -296,6 +309,7 @@
       $("#authPanel").classList.toggle("hidden", loggedIn);
       $("#sessionPanel").classList.toggle("hidden", !loggedIn);
       $("#moneyPanel").classList.toggle("hidden", !loggedIn);
+      $("#addressesPanel").classList.toggle("hidden", !loggedIn);
       $("#activityPanel").classList.toggle("hidden", !loggedIn);
       $("#userCount").textContent = state.users.length;
       $("#balance").textContent = loggedIn ? Number(state.currentUser.balance).toLocaleString() : "-";
@@ -306,9 +320,14 @@
         $("#avatar").textContent = state.currentUser.name.trim().charAt(0).toUpperCase() || "U";
       }
 
+      $("#addressGrid").innerHTML = state.addresses.map((entry) => `<article class="address-card"><div class="address-profile">${escapeHtml(entry.profile)}</div><div class="address-value" title="${escapeHtml(entry.address)}">${escapeHtml(entry.address)}</div><div class="address-path">${escapeHtml(entry.derivation_path)}</div></article>`).join("");
+      $("#depositAddress").innerHTML = state.addresses.map((entry) => `<option value="${escapeHtml(entry.address)}">${escapeHtml(entry.profile)} #${Number(entry.address_index) + 1} · ${escapeHtml(entry.address.slice(0, 10))}…</option>`).join("");
+      const profiles = [...new Set(state.addresses.map((entry) => entry.profile))];
+      $("#walletProfiles").innerHTML = profiles.map((profile) => `<option value="${escapeHtml(profile)}"></option>`).join("");
+
       $("#usersBody").innerHTML = state.users.map((user) => `<tr><td>${user.id}</td><td>${escapeHtml(user.name)}</td><td>${escapeHtml(user.email)}</td><td class="amount">${Number(user.balance).toLocaleString()}</td></tr>`).join("");
       $("#usersEmpty").classList.toggle("hidden", state.users.length > 0);
-      $("#activityBody").innerHTML = state.activity.map((entry) => `<tr><td>${entry.kind === "deposit" ? "Deposit" : "Purchase"}</td><td>${escapeHtml(entry.external_id)}</td><td>${escapeHtml(entry.description || "-")}</td><td><span class="badge ${entry.status}">${escapeHtml(entry.status)}</span></td><td class="amount ${entry.kind === "deposit" ? "plus" : "minus"}">${entry.kind === "deposit" ? "+" : "-"}${Number(entry.amount).toLocaleString()}</td></tr>`).join("");
+      $("#activityBody").innerHTML = state.activity.map((entry) => `<tr><td>${entry.kind === "deposit" ? "Deposit" : "Purchase"}</td><td>${escapeHtml(entry.external_id)}</td><td>${escapeHtml(entry.kind === "deposit" ? `${entry.profile} · ${entry.address}` : entry.description || "-")}</td><td><span class="badge ${entry.status}">${escapeHtml(entry.status)}</span></td><td class="amount ${entry.kind === "deposit" ? "plus" : "minus"}">${entry.kind === "deposit" ? "+" : "-"}${Number(entry.amount).toLocaleString()}</td></tr>`).join("");
       $("#activityEmpty").classList.toggle("hidden", state.activity.length > 0);
     }
 
@@ -321,13 +340,15 @@
         state.users = await api("/users", { auth: false });
         state.currentUser = state.users.find((user) => user.email === state.email) || null;
         if (state.token) {
-          const [transactions, expenses] = await Promise.all([api("/transactions"), api("/expenses")]);
+          const [addresses, transactions, expenses] = await Promise.all([api("/addresses"), api("/transactions"), api("/expenses")]);
+          state.addresses = addresses;
           state.activity = [
             ...transactions.map((entry) => ({ ...entry, kind: "deposit" })),
             ...expenses.map((entry) => ({ ...entry, kind: "expense" })),
           ].sort((a, b) => Number(b.created_at) - Number(a.created_at));
         } else {
           state.activity = [];
+          state.addresses = [];
         }
         $("#statusDot").classList.add("online");
         render();
@@ -354,6 +375,7 @@
       state.email = "";
       state.currentUser = null;
       state.activity = [];
+      state.addresses = [];
       localStorage.removeItem("crudo.token");
       localStorage.removeItem("crudo.email");
       render();
@@ -395,7 +417,21 @@
       const button = event.currentTarget.querySelector("button");
       const data = new FormData(event.currentTarget);
       setBusy(button, true, "Adding");
-      try { await api("/transactions", { method: "POST", body: JSON.stringify({ external_id: crypto.randomUUID(), amount: Number(data.get("amount")) }) }); await refresh(); toast("Deposit confirmed"); } catch (error) { toast(error.message, true); } finally { setBusy(button, false); }
+      try {
+        const destination = state.addresses.find((entry) => entry.address === data.get("destination"));
+        if (!destination) throw new Error("Select an assigned deposit address");
+        await api("/transactions", { method: "POST", body: JSON.stringify({ external_id: crypto.randomUUID(), profile: destination.profile, address: destination.address, amount: Number(data.get("amount")) }) });
+        await refresh();
+        toast("Deposit transfer simulated");
+      } catch (error) { toast(error.message, true); } finally { setBusy(button, false); }
+    });
+
+    $("#addressForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const button = event.currentTarget.querySelector("button");
+      const data = new FormData(event.currentTarget);
+      setBusy(button, true, "Generating");
+      try { await api("/addresses", { method: "POST", body: JSON.stringify({ profile: data.get("profile") }) }); await refresh(); toast("Additional address generated"); } catch (error) { toast(error.message, true); } finally { setBusy(button, false); }
     });
 
     $("#expenseForm").addEventListener("submit", async (event) => {

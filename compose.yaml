@@ -20,6 +20,8 @@ services:
     environment:
       E2E_BACKEND: sqlite
       DATABASE_URL: sqlite:///tmp/crudo-e2e.db?mode=rwc
+      WALLET_MNEMONIC: abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about
+      WALLET_PASSPHRASE: ""
 
   e2e-postgres:
     build:
@@ -31,3 +33,5 @@ services:
     environment:
       E2E_BACKEND: postgres
       DATABASE_URL: postgres://crudo:crudo@postgres:5432/crudo
+      WALLET_MNEMONIC: abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about
+      WALLET_PASSPHRASE: ""
