@@ -65,12 +65,3 @@ curl -X DELETE http://127.0.0.1:3000/v1/items/1
 | `DELETE` targets a missing item | `200` with `null`, because the action is `optional` |
 | `name` is missing | `400` |
 | Body is not a JSON object | `400` |
-
-The full demo additionally requires:
-
-- A solved ALTCHA proof for registration
-- Basic authentication to create a Bearer token
-
-::: warning
-Do not use test seed phrases as production credentials.
-:::

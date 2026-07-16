@@ -22,8 +22,6 @@ Use independent high-entropy ALTCHA `secret` and `key_secret` values.
 
 ::: warning Replace demo policy in production
 The demo has 24-hour tokens, confirmed deposits and expenses, and public user reads. Full-demo configuration reads `ALTCHA_SECRET` and `ALTCHA_KEY_SECRET`; supply independent high-entropy values through a secret manager.
-
-Documentation contains no production mnemonic recommendation.
 :::
 
 ## Starter boundary
