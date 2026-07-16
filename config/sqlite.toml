@@ -21,9 +21,9 @@ window_seconds = 60
 
 [altcha]
 path = "/challenge"
-# Development values only. Inject strong independent secrets in production.
-secret = "development-only-change-me"
-key_secret = "development-key-only-change-me"
+# Required independent ALTCHA secrets are supplied through the environment.
+secret = "${ALTCHA_SECRET}"
+key_secret = "${ALTCHA_KEY_SECRET}"
 algorithm = "PBKDF2/SHA-256"
 cost = 5000
 max_number = 10000
@@ -175,7 +175,6 @@ setup = [
 
 [wallets]
 mnemonic = "${WALLET_MNEMONIC}"
-passphrase = "${WALLET_PASSPHRASE}"
 
 [[wallets.profiles]]
 name = "ethereum-mainnet"

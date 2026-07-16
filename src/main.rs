@@ -5,7 +5,7 @@ use crudo::{connect, load_config, run};
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
-    #[arg(long, default_value = "config/sqlite.toml")]
+    #[arg(long, default_value = "config/minimal.toml")]
     config: String,
 
     /// Override the configured listen address

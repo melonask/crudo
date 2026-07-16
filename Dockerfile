@@ -1,4 +1,4 @@
-FROM rust:1.97.0-alpine3.23 AS build
+FROM rust:1.97-alpine3.24 AS build
 WORKDIR /app
 RUN apk add --no-cache musl-dev
 COPY Cargo.toml Cargo.lock ./
@@ -9,7 +9,7 @@ RUN cargo build --locked --release && mkdir /data
 
 FROM scratch AS runtime
 COPY --from=builder /app/target/release/crudo /usr/local/bin/crudo
-COPY config/postgres.toml /etc/crudo/config.toml
+COPY config/minimal.toml /etc/crudo/config.toml
 COPY --from=builder --chown=10001:10001 /data /data
 USER 10001:10001
 WORKDIR /data
@@ -28,7 +28,7 @@ RUN mkdir /out \
        done \
     && test -x /out/e2e
 
-FROM alpine:3.23 AS test
+FROM alpine:3.24 AS test
 COPY --from=e2e-builder /out/e2e /usr/local/bin/e2e
 USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/e2e"]

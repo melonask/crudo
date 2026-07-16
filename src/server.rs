@@ -177,6 +177,13 @@ pub fn build_router(pool: AnyPool, config: Config) -> Result<Router> {
     let cors = config.server.cors;
     validate_limits(default_limits, "server")?;
     for (name, action) in &config.actions {
+        if let Some(code) = action.status {
+            let status = StatusCode::from_u16(code)
+                .with_context(|| format!("action {name} has invalid status {code}"))?;
+            if !status.is_success() {
+                bail!("action {name} status must be a 2xx success status");
+            }
+        }
         for error in &action.errors {
             let status = StatusCode::from_u16(error.status).with_context(|| {
                 format!("action {name} has invalid error status {}", error.status)
@@ -1068,5 +1075,32 @@ mod tests {
             .unwrap();
 
         assert!(build_router(pool, config).is_err());
+    }
+
+    #[tokio::test]
+    async fn non_success_action_status_is_rejected_at_startup() {
+        sqlx::any::install_default_drivers();
+        let config = Config::parse(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [[endpoints]]
+            method = "GET"
+            path = "/items"
+            action = "items"
+
+            [actions.items]
+            sql = "SELECT 1 AS id"
+            status = 404
+            "#,
+        )
+        .unwrap();
+        let pool = AnyPoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+
+        let error = build_router(pool, config).err().unwrap();
+        assert!(error.to_string().contains("2xx success"));
     }
 }

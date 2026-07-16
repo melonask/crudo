@@ -39,8 +39,7 @@ impl Backend {
             .replace(
                 "${WALLET_MNEMONIC}",
                 "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-            )
-            .replace("${WALLET_PASSPHRASE}", "");
+            );
         let placeholder = if self == Self::Sqlite { "?" } else { "$1" };
         format!(
             r#"{source}

@@ -16,11 +16,15 @@ pub async fn connect(config: &Config) -> Result<AnyPool> {
 }
 
 pub async fn prepare_database(pool: &AnyPool, config: &Config) -> Result<()> {
+    prepare_database_setup(pool, &config.database.setup).await
+}
+
+pub(crate) async fn prepare_database_setup(pool: &AnyPool, setup: &[String]) -> Result<()> {
     let mut transaction = pool
         .begin()
         .await
         .context("could not start database setup transaction")?;
-    for (index, statement) in config.database.setup.iter().enumerate() {
+    for (index, statement) in setup.iter().enumerate() {
         sqlx::raw_sql(AssertSqlSafe(statement.as_str()))
             .execute(&mut *transaction)
             .await
@@ -105,7 +109,8 @@ mod tests {
                 "${WALLET_MNEMONIC}",
                 "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
             )
-            .replace("${WALLET_PASSPHRASE}", "");
+            .replace("${ALTCHA_SECRET}", "database-test-altcha-secret")
+            .replace("${ALTCHA_KEY_SECRET}", "database-test-altcha-key-secret");
         Config::parse(&source).unwrap()
     }
 

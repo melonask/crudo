@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub(crate) database: Database,
     #[serde(default)]
@@ -30,6 +31,7 @@ impl Config {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Database {
     pub(crate) url: String,
     #[serde(default)]
@@ -37,6 +39,7 @@ pub(crate) struct Database {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Server {
     #[serde(default = "default_address")]
     pub(crate) address: String,
@@ -59,6 +62,7 @@ impl Default for Server {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Cors {
     pub(crate) origins: Vec<String>,
 }
@@ -68,6 +72,7 @@ fn default_address() -> String {
 }
 
 #[derive(Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Limits {
     #[serde(default = "default_body_bytes")]
     pub(crate) body_bytes: usize,
@@ -126,6 +131,7 @@ fn default_window_seconds() -> u64 {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Endpoint {
     pub(crate) method: String,
     pub(crate) path: String,
@@ -143,6 +149,7 @@ pub(crate) struct Endpoint {
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct EndpointLimits {
     pub(crate) body_bytes: Option<usize>,
     pub(crate) timeout_seconds: Option<u64>,
@@ -156,6 +163,7 @@ fn default_true() -> bool {
 }
 
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Action {
     pub(crate) sql: String,
     #[serde(default)]
@@ -238,6 +246,7 @@ pub(crate) enum BitcoinNetwork {
 }
 
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ActionError {
     pub(crate) database_message: String,
     pub(crate) status: u16,
@@ -262,12 +271,14 @@ pub(crate) enum AuthMethod {
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Authentication {
     pub(crate) basic: Option<BasicAuth>,
     pub(crate) bearer: Option<BearerAuth>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct BasicAuth {
     pub(crate) sql: String,
     pub(crate) owner: String,
@@ -275,12 +286,14 @@ pub(crate) struct BasicAuth {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct BearerAuth {
     pub(crate) sql: String,
     pub(crate) owner: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Altcha {
     pub(crate) secret: String,
     pub(crate) key_secret: String,
@@ -324,7 +337,10 @@ fn default_altcha_bind_ip() -> bool {
 
 pub async fn load_config(location: &str) -> Result<Config> {
     crate::tls::install_crypto_provider();
-    let source = if location.starts_with("http://") || location.starts_with("https://") {
+    if location.starts_with("http://") {
+        bail!("remote configuration must use HTTPS: {location}");
+    }
+    let source = if location.starts_with("https://") {
         reqwest::get(location)
             .await
             .with_context(|| format!("could not fetch {location}"))?
@@ -357,7 +373,7 @@ fn expand_env(source: &str) -> Result<String> {
         }
         expanded.push_str(
             &std::env::var(name)
-                .with_context(|| format!("environment variable {name} is not set"))?,
+                .with_context(|| format!("required environment variable {name} is not set"))?,
         );
         rest = &variable[end + 1..];
     }
@@ -378,5 +394,63 @@ mod tests {
         );
         assert!(expand_env("${}").is_err());
         assert!(expand_env("${UNCLOSED").is_err());
+    }
+
+    #[test]
+    fn configuration_rejects_unknown_fields() {
+        let top_level = Config::parse(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+            unexpected = true
+            "#,
+        )
+        .err()
+        .unwrap();
+        assert!(format!("{top_level:#}").contains("unexpected"));
+
+        let nested = Config::parse(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [server.limits]
+            body_btyes = 1024
+            "#,
+        )
+        .err()
+        .unwrap();
+        assert!(format!("{nested:#}").contains("body_btyes"));
+    }
+
+    #[test]
+    fn missing_environment_variable_explains_that_it_is_required() {
+        let error = Config::parse(
+            r#"
+            [database]
+            url = "${CRUDO_TEST_ABSENT_ENV_7FC49D3A}"
+            "#,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("required environment variable CRUDO_TEST_ABSENT_ENV_7FC49D3A")
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_http_remote_configuration_is_rejected() {
+        let error = load_config("http://example.invalid/config.toml")
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("must use HTTPS"));
+    }
+
+    #[test]
+    fn minimal_configuration_needs_no_environment_variables() {
+        Config::parse(include_str!("../config/minimal.toml")).unwrap();
     }
 }

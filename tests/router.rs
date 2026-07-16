@@ -649,7 +649,8 @@ fn example_sqlite_config(database_url: &str) -> String {
             "${WALLET_MNEMONIC}",
             "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
         )
-        .replace("${WALLET_PASSPHRASE}", "")
+        .replace("${ALTCHA_SECRET}", "router-test-altcha-secret")
+        .replace("${ALTCHA_KEY_SECRET}", "router-test-altcha-key-secret")
 }
 
 #[tokio::test]
