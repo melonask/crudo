@@ -1,36 +1,127 @@
 # Configuration reference
 
-All fields below are TOML fields. Unlisted defaults are not inferred.
+All fields are TOML fields. Unlisted defaults are not inferred.
 
-## Root and server
+::: danger Strict schema validation
+All static configuration tables reject unknown fields. A misspelled protection, limit, endpoint, action, authentication, ALTCHA, or wallet field fails startup rather than silently using a default.
 
-| Field | Type / default | Rule |
-|---|---|---|
-| `database.url` | string, required | SQLx SQLite or PostgreSQL connection URL. |
-| `database.setup` | string array, `[]` | Statements run atomically before serving. |
-| `server.address` | string, `127.0.0.1:3000` | Listen address; CLI may override it. |
-| `server.prefix` | string, `""` | Mounted before endpoint and ALTCHA paths; configured paths must start `/`. |
-| `server.cors.origins` | string array | Optional CORS table; when present it must be nonempty. Allows all methods and `Authorization`/`Content-Type`. |
-| `server.limits.body_bytes` | usize, `1048576` | Must be > 0. |
-| `.timeout_seconds` | u64, `30` | Must be > 0. |
-| `.concurrency` | usize, `100` | Must be > 0. |
-| `.requests` | u32, `120` | Per direct-IP, endpoint-local window; `0` disables limiting. |
-| `.window_seconds` | u64, `60` | Must be > 0 when requests is enabled. |
+Dynamic action names and wallet `values` keys remain user-defined map keys.
+:::
 
-`[[endpoints]]` requires `method`, `path`, and existing `action`. Supported methods are GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, TRACE. Duplicate method/path pairs fail startup. `auth` is `[]` by default and contains `basic` and/or `bearer`; each requires its corresponding auth table. `auth_optional` defaults false and is valid only with `auth`. `altcha` defaults false; `altcha_for_authenticated` defaults true and can be false only with `altcha` and auth. `[endpoints.limits]` has optional versions of all five limit fields and overrides server values.
+## Root and database
 
-## Actions, authentication, ALTCHA
+| Field | Required | Default | Validation / behavior |
+|---|---|---|---|
+| `database.url` | Yes | — | SQLx SQLite or PostgreSQL connection URL. |
+| `database.setup` | No | `[]` | Statements run atomically before serving. |
 
-`[actions.NAME]` requires `sql`; `params`, `hash`, and `errors` default empty; `result` defaults `execute`; `no_store` defaults false; `status` is optional and, when supplied, must be a valid 2xx HTTP status at startup. `result` is `execute`, `one`, `optional`, or `many`. Each `[[actions.NAME.errors]]` requires `database_message`, 400–599 `status`, and response `message`.
+## Server and CORS
 
-All static configuration tables reject unknown fields. A misspelled protection, limit, endpoint, action, authentication, ALTCHA, or wallet field therefore fails startup instead of silently falling back to a default. Dynamic action names and wallet `values` keys remain user-defined map keys.
+| Field | Required | Default | Validation / behavior |
+|---|---|---|---|
+| `server.address` | No | `127.0.0.1:3000` | Listen address; CLI may override it. |
+| `server.prefix` | No | `""` | Mounted before endpoint and ALTCHA paths. Configured paths must start with `/`. |
+| `server.cors.origins` | No | — | When `[server.cors]` exists, this nonempty string array is required. Allows all methods and `Authorization`/`Content-Type`. |
 
-`[auth.basic]` requires SQL `sql`, selected owner-column `owner`, and password-hash column `password`. `[auth.bearer]` requires `sql` and `owner`. Both tables are optional unless a route names their method.
+## Limits
 
-`[altcha]` is optional unless an endpoint sets `altcha = true`. It requires `secret` and `key_secret`; `path` defaults `/challenge`, `algorithm` `PBKDF2/SHA-256`, `cost` `5000`, `max_number` `10000`, `expires_seconds` `300`, and `bind_ip` `true`. An ALTCHA challenge route is mounted whenever `[altcha]` exists, and it must not conflict with a configured GET route.
+Server limits apply by default. `[endpoints.limits]` accepts optional versions of every field below and overrides the server value.
 
-## Wallet schema
+| Field | Required | Default | Validation / behavior |
+|---|---|---|---|
+| `server.limits.body_bytes` | No | `1048576` | `usize`; must be greater than `0`. |
+| `server.limits.timeout_seconds` | No | `30` | `u64`; must be greater than `0`. |
+| `server.limits.concurrency` | No | `100` | `usize`; must be greater than `0`. |
+| `server.limits.requests` | No | `120` | `u32`; per direct-IP, endpoint-local window. `0` disables limiting. |
+| `server.limits.window_seconds` | No | `60` | `u64`; must be greater than `0` when requests are enabled. |
 
-`[wallets]` is optional, but requires `mnemonic` when present; `passphrase` is string/default `""`; `profiles` defaults `[]` but must be nonempty. A profile requires `name`, `caip2`, `curve`, `derivation`, `path`, `address_format`, and `max_addresses`; `network` is optional and only required for `p2wpkh`. See [wallets](./wallets) for allowed values and validation.
+## Endpoints
 
-`[actions.NAME.wallets]` requires `sql`, `params`, `values`, and exactly one of `profiles` (nonempty names) or `profile` (input field name). The parent must be `result = "one"`, and `[wallets]` must exist. `values` exactly maps every `{placeholder}` in each selected profile path to a decimal u32 or `$result.column`.
+| Field | Required | Default | Validation / behavior |
+|---|---|---|---|
+| `endpoints.method` | Yes | — | One of GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, or TRACE. |
+| `endpoints.path` | Yes | — | Must start with `/`. |
+| `endpoints.action` | Yes | — | Must name an existing action. |
+| `endpoints.auth` | No | `[]` | Contains `basic` and/or `bearer`; each needs its matching auth table. |
+| `endpoints.auth_optional` | No | `false` | Valid only when `auth` is configured. |
+| `endpoints.altcha` | No | `false` | Requires `[altcha]` when true. |
+| `endpoints.altcha_for_authenticated` | No | `true` | May be false only when `altcha` and `auth` are configured. |
+| `endpoints.limits` | No | — | Optional overrides for all five limit fields. |
+
+- Duplicate method/path pairs fail startup.
+- Endpoint paths and the ALTCHA challenge path are mounted under `server.prefix`.
+
+## Actions
+
+| Field | Required | Default | Validation / behavior |
+|---|---|---|---|
+| `actions.NAME.sql` | Yes | — | SQL configured for the action. |
+| `actions.NAME.params` | No | `[]` | Bound in declared order. |
+| `actions.NAME.hash` | No | `[]` | Named request fields to Argon2-hash. |
+| `actions.NAME.result` | No | `execute` | `execute`, `one`, `optional`, or `many`. |
+| `actions.NAME.status` | No | `200` | Must be a valid 2xx status at startup. |
+| `actions.NAME.no_store` | No | `false` | Adds `Cache-Control: no-store` when true. |
+| `actions.NAME.errors` | No | `[]` | Configured database-message mappings. |
+
+Each `[[actions.NAME.errors]]` entry requires `database_message`, a 400–599 `status`, and response `message`.
+
+## Authentication
+
+Authentication tables are optional until an endpoint names their method.
+
+| Field | Required | Default | Validation / behavior |
+|---|---|---|---|
+| `auth.basic.sql` | Yes for Basic | — | SQL that selects the owner and password hash. |
+| `auth.basic.owner` | Yes for Basic | — | Selected owner-column name. |
+| `auth.basic.password` | Yes for Basic | — | Selected password-hash column name. |
+| `auth.bearer.sql` | Yes for Bearer | — | SQL that resolves the owner. |
+| `auth.bearer.owner` | Yes for Bearer | — | Selected owner-column name. |
+
+## ALTCHA
+
+| Field | Required | Default | Validation / behavior |
+|---|---|---|---|
+| `altcha.secret` | Yes when `[altcha]` exists | — | ALTCHA secret. |
+| `altcha.key_secret` | Yes when `[altcha]` exists | — | Independent ALTCHA key secret. |
+| `altcha.path` | No | `/challenge` | Challenge route path. |
+| `altcha.algorithm` | No | `PBKDF2/SHA-256` | Challenge algorithm. |
+| `altcha.cost` | No | `5000` | Challenge cost. |
+| `altcha.max_number` | No | `10000` | Challenge maximum number. |
+| `altcha.expires_seconds` | No | `300` | Challenge lifetime. |
+| `altcha.bind_ip` | No | `true` | Binds proofs to the direct peer IP. |
+
+- `[altcha]` is required when an endpoint sets `altcha = true`.
+- A challenge GET route is mounted whenever `[altcha]` exists.
+- The challenge route must not conflict with a configured GET route.
+
+## Wallets
+
+| Field | Required | Default | Validation / behavior |
+|---|---|---|---|
+| `wallets.mnemonic` | Yes when `[wallets]` exists | — | BIP-39 mnemonic source. |
+| `wallets.passphrase` | No | `""` | Optional passphrase. |
+| `wallets.profiles` | Yes when `[wallets]` exists | `[]` | Must be nonempty. |
+| `wallets.profiles.name` | Yes | — | Profile name. |
+| `wallets.profiles.caip2` | Yes | — | CAIP-2 identifier. |
+| `wallets.profiles.curve` | Yes | — | Supported curve. |
+| `wallets.profiles.derivation` | Yes | — | Supported derivation method. |
+| `wallets.profiles.path` | Yes | — | Derivation path template. |
+| `wallets.profiles.address_format` | Yes | — | Supported address format. |
+| `wallets.profiles.network` | Conditional | — | Required only for `p2wpkh`. |
+| `wallets.profiles.max_addresses` | Yes | — | Maximum addresses for the profile. |
+
+See [wallets](./wallets) for accepted combinations and path validation.
+
+## Wallet action stages
+
+| Field | Required | Default | Validation / behavior |
+|---|---|---|---|
+| `actions.NAME.wallets.sql` | Yes | — | Address persistence SQL. |
+| `actions.NAME.wallets.params` | Yes | — | Persistence parameters. |
+| `actions.NAME.wallets.values` | Yes | — | Placeholder values for selected profile paths. |
+| `actions.NAME.wallets.profiles` | Exactly one selector | — | Nonempty configured profile names. |
+| `actions.NAME.wallets.profile` | Exactly one selector | — | Request input field naming a configured profile. |
+
+- A wallet stage requires `[wallets]` and a parent `result = "one"` action.
+- `profiles` and `profile` are mutually exclusive.
+- `values` maps every `{placeholder}` in each selected profile path exactly once to a decimal `u32` or `$result.column`.

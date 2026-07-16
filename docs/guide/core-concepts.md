@@ -1,9 +1,38 @@
 # Core concepts
 
-An **endpoint** maps an HTTP method and path to a named **action**. An action executes configured SQL with its `params` bound in order and serializes the result as JSON. No implicit CRUD exists: every route and query is deliberate.
+## Endpoints and actions
 
-Request values merge in this order: query parameters, then path parameters (path wins on duplicate keys), then JSON-object body (body wins). Path/query values are strings. The body must be a JSON object. Authentication adds `$owner`; an action that lists `$token` in `params` receives a fresh random Argon2 salt string.
+An **endpoint** maps an HTTP method and path to a named **action**. The action executes configured SQL, binds its `params` in order, and serializes its result as JSON.
 
-Actions may hash named string fields with Argon2 before binding. A wallet stage first executes a required `one` primary action, derives addresses using returned columns, persists each address, and commits all work together. Any failure rolls it back.
+There is no implicit CRUD. Every route and query is deliberate.
 
-Database rows become objects: integer/float/bool types stay JSON scalars, blobs/`BYTEA` become Base64 strings, null remains null, and other types become strings.
+## Request input
+
+| Priority | Source | Duplicate-name behavior |
+|---|---|---|
+| 1 | Query parameters | Initial value; strings. |
+| 2 | Path parameters | Replaces query value; strings. |
+| 3 | JSON-object body | Replaces path/query value. |
+
+The body must be a JSON object.
+
+Crudo can also add values that do not come from the request:
+
+- Successful authentication adds `$owner`.
+- Listing `$token` in `params` generates a fresh random token value.
+
+## Transformations and wallet stages
+
+- Actions can Argon2-hash named string fields with `hash` before binding.
+- A wallet stage first runs a required `one` primary action.
+- It derives addresses from returned columns, persists them, and commits all work together.
+- Any wallet-stage failure rolls the transaction back.
+
+## JSON row conversion
+
+| Database value | JSON representation |
+|---|---|
+| Integer, float, boolean | Matching JSON scalar |
+| Blob / `BYTEA` | Base64 string |
+| `NULL` | `null` |
+| Other type | String |

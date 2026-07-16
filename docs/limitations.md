@@ -2,19 +2,49 @@
 
 ## Known boundaries
 
-- SQL is configured text and is explicitly marked safe internally: configuration authors are trusted.
-- Request rate and ALTCHA replay state are in-memory per process; see [deployment](/operations/deployment).
-- Only SQLite and PostgreSQL are configured SQLx drivers. Wallet support is limited to the three profile combinations in the [reference](/reference/wallets).
-- Wallet derivation stores public address/path metadata, not private keys. Protect root secrets and plan profile-name migrations.
+| Boundary | Detail |
+|---|---|
+| Trusted configuration | SQL is configured text and explicitly marked safe internally; configuration authors are trusted. |
+| Process-local state | Request rate and ALTCHA replay state are in-memory per process. See [deployment](/operations/deployment). |
+| Database drivers | Only SQLite and PostgreSQL SQLx drivers are configured. |
+| Wallet support | Limited to the three profile combinations in the [wallet reference](/reference/wallets). |
+| Wallet storage | Public address and path metadata are stored, not private keys. Protect root secrets and plan profile-name migrations. |
 
 ## Troubleshooting
 
-**Startup says an environment variable is not set.** Locate `${NAME}` in the selected TOML and provide it, or remove the optional feature table. The minimal config needs none. `WALLET_MNEMONIC` is required by full wallet demo files, not by crudo globally; those files also require `ALTCHA_SECRET` and `ALTCHA_KEY_SECRET`.
+### Startup says an environment variable is not set
 
-**No endpoints configured / unknown action / duplicate route.** Every configuration needs at least one endpoint, each endpoint names an existing action, and method/path pairs must be unique after prefixing.
+**Cause:** The selected TOML contains `${NAME}` without a supplied value.
 
-**PostgreSQL type error.** Path/query parameters are strings; cast them in SQL (`$1::BIGINT`). Use numbered PostgreSQL parameters, not SQLite `?` conventions.
+**Fix:** Provide the value or remove the optional feature table.
 
-**429 or ALTCHA failures behind a proxy.** The direct proxy peer is used as the IP. Enforce public-IP policy at the proxy and account for sticky routing or disable IP binding only after assessing replay risk.
+Environment requirements by configuration:
 
-**Wallet action fails.** Confirm valid mnemonic, a nonempty profile set, compatible curve/derivation/format, exact placeholder values, values below `2^31`, and a `one` primary result.
+- Built-in minimal starter: none
+- Full wallet demos: `WALLET_MNEMONIC`, `ALTCHA_SECRET`, and `ALTCHA_KEY_SECRET`
+
+`WALLET_MNEMONIC` is not globally required by crudo.
+
+### No endpoints configured, unknown action, or duplicate route
+
+**Cause:** A configuration needs at least one endpoint, every endpoint must name an existing action, and method/path pairs must be unique after prefixing.
+
+**Fix:** Add an endpoint, correct its action name, or make the resulting method/path pair unique.
+
+### PostgreSQL type error
+
+**Cause:** Path and query parameters are strings, but the SQL comparison expects a numeric type.
+
+**Fix:** Cast the value in SQL, for example `$1::BIGINT`. Use numbered PostgreSQL parameters rather than SQLite `?` placeholders.
+
+### `429` or ALTCHA failures behind a proxy
+
+**Cause:** Crudo uses the direct proxy peer as the IP.
+
+**Fix:** Enforce public-IP policy at the proxy. Account for sticky routing, or disable IP binding only after assessing replay risk.
+
+### Wallet action fails
+
+**Cause:** The mnemonic, profile set, profile combination, placeholder values, or primary result is invalid.
+
+**Fix:** Confirm a valid mnemonic, nonempty profile set, compatible curve/derivation/format, exact placeholder values below `2^31`, and a `one` primary result.

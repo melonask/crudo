@@ -1,9 +1,33 @@
 # Security model
 
-Use parameter binding, never interpolate request values into SQL. Keep action SQL narrowly authorized by database credentials. Hash passwords via `hash`; configure Basic auth to select a password-hash column and Bearer auth to resolve an owner column.
+## SQL and authentication
 
-Enable ALTCHA on abuse-prone anonymous endpoints, use independent high-entropy `secret` and `key_secret`, and restrict CORS origins. Set body, timeout, concurrency, and per-IP rate limits for realistic traffic. See [deployment](/operations/deployment) for proxy, TLS, and replica boundaries.
+- Use parameter binding; never interpolate request values into SQL.
+- Keep action SQL narrowly authorized by database credentials.
+- Hash passwords with `hash`.
+- Configure Basic auth to select a password-hash column and Bearer auth to resolve an owner column.
 
-The demo policy is deliberately illustrative: 24-hour tokens, confirmed deposits and expenses, and public user reads. Full demo configuration obtains ALTCHA secrets from `ALTCHA_SECRET` and `ALTCHA_KEY_SECRET`; supply independent high-entropy values through a secret manager. Replace demo policy choices for production; documentation contains no production mnemonic recommendation.
+## Request protections
 
-`config/minimal.toml` is deliberately zero-secret and unauthenticated so a local checkout starts immediately. Its loopback bind, parameter binding, and load limits reduce local risk, but they are not an authorization policy. Add authentication and owner-scoped SQL before exposing equivalent CRUD routes publicly.
+| Control | Use |
+|---|---|
+| ALTCHA | Protect abuse-prone anonymous endpoints. |
+| CORS origins | Restrict browser origins explicitly. |
+| Body, timeout, concurrency limits | Bound request resource use. |
+| Per-IP limits | Apply realistic direct-IP limits. |
+
+Use independent high-entropy ALTCHA `secret` and `key_secret` values.
+
+## Demo policy
+
+::: warning Replace demo policy in production
+The demo has 24-hour tokens, confirmed deposits and expenses, and public user reads. Full-demo configuration reads `ALTCHA_SECRET` and `ALTCHA_KEY_SECRET`; supply independent high-entropy values through a secret manager.
+
+Documentation contains no production mnemonic recommendation.
+:::
+
+## Starter boundary
+
+The built-in starter enables transactional setup and body, timeout, concurrency, and per-IP limits. It does not enable Basic/Bearer authentication, ALTCHA, or CORS.
+
+Add authentication and owner-scoped SQL before exposing equivalent CRUD routes publicly. See [deployment](/operations/deployment) for proxy, TLS, and replica boundaries.
