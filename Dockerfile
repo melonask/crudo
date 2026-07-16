@@ -3,6 +3,7 @@ WORKDIR /app
 RUN apk add --no-cache musl-dev
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY config/minimal.toml ./config/minimal.toml
 
 FROM build AS builder
 RUN cargo build --locked --release && mkdir /data
