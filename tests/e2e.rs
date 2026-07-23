@@ -2,7 +2,7 @@ use std::{env, time::Duration};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use crudo::{Config, build_router, connect, prepare_database, serve};
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, header::HeaderName};
 use serde_json::{Value, json};
 use sqlx::AnyPool;
 
@@ -11,6 +11,10 @@ enum Backend {
     Sqlite,
     Postgres,
 }
+
+const TEST_WALLET_MNEMONIC: &str =
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+const PAYMENT_REQUIRED: HeaderName = HeaderName::from_static("payment-required");
 
 impl Backend {
     fn from_env() -> Self {
@@ -43,6 +47,7 @@ impl Backend {
                 )
                 .replace("requests = 60", "requests = 0"),
         }
+        .replace("${WALLET_MNEMONIC}", TEST_WALLET_MNEMONIC)
     }
 }
 
@@ -153,7 +158,20 @@ async fn real_http_store_lifecycle() {
         json!({"external_id":insufficient_external_id,"product_id":expensive_id}),
     )
     .await;
-    assert_eq!(insufficient.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(insufficient.status(), StatusCode::PAYMENT_REQUIRED);
+    let alice_destinations =
+        assert_store_payment_required(payment_required_payload(insufficient).await, alice_id);
+    let bob_insufficient = post(
+        &client,
+        &format!("{base}/purchases"),
+        &bob,
+        json!({"external_id":format!("bob-insufficient-{suffix}"),"product_id":expensive_id}),
+    )
+    .await;
+    assert_eq!(bob_insufficient.status(), StatusCode::PAYMENT_REQUIRED);
+    let bob_destinations =
+        assert_store_payment_required(payment_required_payload(bob_insufficient).await, bob_id);
+    assert_ne!(alice_destinations, bob_destinations);
     assert_eq!(me(&client, &base, &alice).await["balance"], 3701);
     assert_history_absent(&client, &base, &alice, &insufficient_external_id).await;
 
@@ -246,6 +264,70 @@ async fn post(client: &Client, url: &str, token: &str, body: Value) -> reqwest::
 
 async fn me(client: &Client, base: &str, token: &str) -> Value {
     get(client, &format!("{base}/me"), Some(token)).await
+}
+
+async fn payment_required_payload(response: reqwest::Response) -> Value {
+    let header = response
+        .headers()
+        .get(&PAYMENT_REQUIRED)
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let body = response.bytes().await.unwrap();
+    assert_eq!(BASE64.decode(header).unwrap(), body);
+    serde_json::from_slice(&body).unwrap()
+}
+
+fn assert_store_payment_required(payload: Value, user_id: i64) -> Vec<Value> {
+    assert_eq!(payload["x402Version"], 2);
+    let accepts = payload["accepts"].as_array().unwrap();
+    assert_eq!(accepts.len(), 1);
+    assert_eq!(
+        accepts[0],
+        json!({
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "49990000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+            "maxTimeoutSeconds": 60,
+            "extra": { "name": "USDC", "version": "2" },
+        })
+    );
+
+    let deposit = &payload["extensions"]["deposit"];
+    assert!(deposit["info"].is_object());
+    assert!(deposit["schema"].is_object());
+    assert_eq!(deposit["info"]["uid"], user_id.to_string());
+    let destinations = deposit["info"]["destinations"].as_array().unwrap();
+    assert_eq!(destinations.len(), 2);
+    for (network, asset) in [
+        ("eip155:8453", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+        (
+            "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        ),
+    ] {
+        let destination = destinations
+            .iter()
+            .find(|destination| destination["network"] == network)
+            .unwrap();
+        assert_eq!(destination["asset"], asset);
+        assert!(
+            destination["payTo"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+        assert_eq!(destination["minAmount"], "49990000");
+        assert!(destination["minAmount"].is_string());
+    }
+    let schema = &deposit["schema"];
+    assert_eq!(schema["additionalProperties"], false);
+    assert_eq!(
+        schema["properties"]["destinations"]["items"]["additionalProperties"],
+        false
+    );
+    destinations.to_vec()
 }
 
 async fn top_up(client: &Client, base: &str, token: &str, external_id: &str, amount: i64) {

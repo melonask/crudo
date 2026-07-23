@@ -20,8 +20,10 @@ url = "sqlite://crudo-store.db?mode=rwc"
 setup = [
   "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL CHECK (name <> ''), email TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (email <> ''), password TEXT NOT NULL CHECK (password <> ''), role TEXT NOT NULL DEFAULT 'customer' CHECK (role IN ('admin', 'customer')), balance INTEGER NOT NULL DEFAULT 0 CHECK (balance >= 0), created_at INTEGER NOT NULL DEFAULT (unixepoch()))",
   "CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY CHECK (token <> ''), user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL CHECK (expires_at > 0))",
+  "CREATE TABLE IF NOT EXISTS user_addresses (user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, profile TEXT NOT NULL CHECK (profile IN ('base', 'solana-mainnet')), caip2 TEXT NOT NULL CHECK (caip2 IN ('eip155:8453', 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp')), address_index INTEGER NOT NULL CHECK (address_index >= 0), address TEXT NOT NULL CHECK (address <> ''), derivation_path TEXT NOT NULL CHECK (derivation_path <> ''), PRIMARY KEY (user_id, profile, address_index), UNIQUE (profile, address))",
   "CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT NOT NULL, category TEXT NOT NULL CHECK (category IN ('license', 'service', 'book', 'asset')), price INTEGER NOT NULL CHECK (price > 0), active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)), fulfillment TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()))",
   "CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, external_id TEXT NOT NULL UNIQUE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT, product_id INTEGER REFERENCES products(id) ON DELETE RESTRICT, kind TEXT NOT NULL CHECK (kind IN ('top_up', 'purchase')), status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed')), amount INTEGER NOT NULL CHECK (amount > 0), product_name TEXT, fulfillment TEXT, license_key TEXT UNIQUE, processed_at INTEGER, created_at INTEGER NOT NULL DEFAULT (unixepoch()), CHECK ((kind = 'top_up' AND product_id IS NULL AND product_name IS NULL AND fulfillment IS NULL AND license_key IS NULL) OR (kind = 'purchase' AND product_id IS NOT NULL AND product_name IS NOT NULL AND fulfillment IS NOT NULL AND license_key IS NOT NULL)))",
+  "CREATE TABLE IF NOT EXISTS exact_payment_methods (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL CHECK (scope = 'GLOBAL'), network TEXT NOT NULL CHECK (network <> ''), asset TEXT NOT NULL CHECK (asset <> ''), pay_to TEXT NOT NULL CHECK (pay_to <> ''), timeout_seconds INTEGER NOT NULL CHECK (timeout_seconds > 0), token_name TEXT NOT NULL CHECK (token_name <> ''), token_version INTEGER NOT NULL CHECK (token_version > 0), active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)), UNIQUE (scope, network, asset, pay_to))",
   "CREATE TRIGGER IF NOT EXISTS users_validate_insert BEFORE INSERT ON users WHEN NEW.name IS NULL OR NEW.name = '' OR NEW.email IS NULL OR NEW.email = '' OR NEW.password IS NULL OR NEW.password = '' BEGIN SELECT RAISE(ABORT, 'invalid user'); END",
   "CREATE TRIGGER IF NOT EXISTS products_validate_insert BEFORE INSERT ON products WHEN NEW.slug = '' OR NEW.name = '' OR NEW.description = '' OR NEW.fulfillment = '' OR NEW.category NOT IN ('license', 'service', 'book', 'asset') OR NEW.price <= 0 OR NEW.active NOT IN (0, 1) BEGIN SELECT RAISE(ABORT, 'invalid product'); END",
   "CREATE TRIGGER IF NOT EXISTS products_validate_update BEFORE UPDATE ON products WHEN NEW.slug = '' OR NEW.name = '' OR NEW.description = '' OR NEW.fulfillment = '' OR NEW.category NOT IN ('license', 'service', 'book', 'asset') OR NEW.price <= 0 OR NEW.active NOT IN (0, 1) BEGIN SELECT RAISE(ABORT, 'invalid product'); END",
@@ -33,6 +35,7 @@ setup = [
   "CREATE TRIGGER IF NOT EXISTS debit_confirmed_purchase_update AFTER UPDATE OF status ON transactions WHEN NEW.kind = 'purchase' AND NEW.status = 'confirmed' AND NEW.processed_at IS NULL BEGIN UPDATE users SET balance = balance - NEW.amount WHERE id = NEW.user_id AND balance >= NEW.amount; SELECT CASE WHEN changes() <> 1 THEN RAISE(ABORT, 'insufficient balance') END; UPDATE transactions SET processed_at = unixepoch() WHERE id = NEW.id; END",
   "CREATE TRIGGER IF NOT EXISTS transactions_preserve_history BEFORE UPDATE ON transactions WHEN OLD.processed_at IS NOT NULL AND (NEW.external_id IS NOT OLD.external_id OR NEW.user_id IS NOT OLD.user_id OR NEW.product_id IS NOT OLD.product_id OR NEW.kind IS NOT OLD.kind OR NEW.status IS NOT OLD.status OR NEW.amount IS NOT OLD.amount OR NEW.product_name IS NOT OLD.product_name OR NEW.fulfillment IS NOT OLD.fulfillment OR NEW.license_key IS NOT OLD.license_key OR NEW.processed_at IS NOT OLD.processed_at OR NEW.created_at IS NOT OLD.created_at) BEGIN SELECT RAISE(ABORT, 'processed transaction is immutable'); END",
   "INSERT INTO users (name, email, password, role) VALUES ('Demo Administrator', 'admin', '$argon2id$v=19$m=19456,t=2,p=1$Ed856bd8JquN3O8a8YbBkQ$9KebavABf/1aW97pVn+LTRTeY4KFIhffpLrJxDa5xcw', 'admin') ON CONFLICT(email) DO NOTHING",
+  "INSERT INTO exact_payment_methods (scope, network, asset, pay_to, timeout_seconds, token_name, token_version) VALUES ('GLOBAL', 'eip155:8453', '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', '0x9858EfFD232B4033E47d90003D41EC34EcaEda94', 60, 'USDC', 2) ON CONFLICT(scope, network, asset, pay_to) DO NOTHING",
   "INSERT INTO products (slug, name, description, category, price, fulfillment) VALUES ('macos-pro-access-code', 'macOS Pro Access Code', 'Single-user access code for the macOS Pro edition.', 'license', 4999, 'Your access code is displayed in this purchase record. Redeem it in the macOS Pro application under Account > Redeem Code.') ON CONFLICT(slug) DO NOTHING",
   "INSERT INTO products (slug, name, description, category, price, fulfillment) VALUES ('background-removal', 'Studio Background Removal', 'One high-resolution image processed with careful edge handling.', 'service', 1299, 'Upload your source image through the store support channel and include this purchase ID. Delivery is provided as a transparent PNG.') ON CONFLICT(slug) DO NOTHING",
   "INSERT INTO products (slug, name, description, category, price, fulfillment) VALUES ('practical-product-design', 'Practical Product Design', 'A digital book on planning, shipping, and maintaining small software products.', 'book', 1899, 'Your purchase record includes your personal reading access code and download instructions.') ON CONFLICT(slug) DO NOTHING",
@@ -47,6 +50,27 @@ password = "password"
 [auth.bearer]
 sql = "SELECT user_id FROM sessions WHERE token = ? AND expires_at > unixepoch()"
 owner = "user_id"
+
+[wallets]
+mnemonic = "${WALLET_MNEMONIC}"
+
+[[wallets.profiles]]
+name = "base"
+caip2 = "eip155:8453"
+curve = "secp256k1"
+derivation = "bip32"
+path = "m/44'/60'/{user_id}'/0/{address_index}"
+address_format = "evm"
+max_addresses = 1
+
+[[wallets.profiles]]
+name = "solana-mainnet"
+caip2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+curve = "ed25519"
+derivation = "slip10"
+path = "m/44'/501'/{user_id}'/{address_index}'"
+address_format = "base58-public-key"
+max_addresses = 1
 
 [[endpoints]]
 method = "POST"
@@ -164,6 +188,15 @@ result = "one"
 status = 201
 no_store = true
 
+[actions.register.wallets]
+profiles = ["base", "solana-mainnet"]
+sql = "INSERT INTO user_addresses (user_id, profile, caip2, address_index, address, derivation_path) VALUES (?, ?, ?, 0, ?, ?)"
+params = ["$result.id", "$profile.name", "$profile.caip2", "$wallet.address", "$wallet.derivation_path"]
+
+[actions.register.wallets.values]
+user_id = "$result.id"
+address_index = "0"
+
 [[actions.register.errors]]
 database_message = "invalid user"
 status = 422
@@ -219,8 +252,13 @@ no_store = true
 
 [[actions.create_purchase.errors]]
 database_message = "insufficient balance"
-status = 422
+status = 402
 message = "insufficient balance"
+
+[actions.create_purchase.errors.x402]
+sql = "WITH product AS (SELECT price FROM products WHERE id = ? AND active = 1), accepts AS (SELECT COALESCE(json_group_array(json_object('scheme', 'exact', 'network', m.network, 'amount', CAST(p.price * 10000 AS TEXT), 'asset', m.asset, 'payTo', m.pay_to, 'maxTimeoutSeconds', m.timeout_seconds, 'extra', json_object('name', m.token_name, 'version', CAST(m.token_version AS TEXT)))), '[]') AS value FROM exact_payment_methods AS m CROSS JOIN product AS p WHERE m.scope = 'GLOBAL' AND m.active = 1), destinations AS (SELECT COALESCE(json_group_array(json_object('network', a.caip2, 'asset', CASE WHEN a.caip2 = 'eip155:8453' THEN '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' WHEN a.caip2 = 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp' THEN 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' END, 'payTo', a.address, 'minAmount', CAST(p.price * 10000 AS TEXT))), '[]') AS value FROM user_addresses AS a CROSS JOIN product AS p WHERE a.user_id = ?) SELECT json_object('x402Version', 2, 'error', 'insufficient balance', 'resource', json_object('url', 'http://127.0.0.1:3000/v1/purchases', 'description', 'Purchase the requested digital-store product with USDC.', 'mimeType', 'application/json'), 'accepts', json(accepts.value), 'extensions', json_object('deposit', json_object('info', json_object('uid', CAST(? AS TEXT), 'destinations', json(destinations.value)), 'schema', json_object('$schema', 'https://json-schema.org/draft/2020-12/schema', 'type', 'object', 'required', json_array('uid', 'destinations'), 'additionalProperties', json('false'), 'properties', json_object('uid', json_object('type', 'string'), 'destinations', json_object('type', 'array', 'items', json_object('type', 'object', 'required', json_array('network', 'asset', 'payTo', 'minAmount'), 'additionalProperties', json('false'), 'properties', json_object('network', json_object('type', 'string'), 'asset', json_object('type', 'string'), 'payTo', json_object('type', 'string'), 'minAmount', json_object('type', 'string'))))))))) AS payment_required FROM accepts CROSS JOIN destinations"
+params = ["product_id", "$owner", "$owner"]
+column = "payment_required"
 
 [[actions.create_purchase.errors]]
 database_message = "external id must not be empty"

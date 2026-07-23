@@ -86,6 +86,12 @@ Each `$result.<column>` reference must exist. Wallet path values must be `u32` v
 
 Every `[[actions.NAME.errors]]` entry requires `database_message`, `status`, and `message`. Error-map statuses are validated at startup.
 
+### x402 errors
+
+An error mapping with `status = 402` can include `[actions.NAME.errors.x402]` with `sql`, optional ordered `params`, and `column`. The query must return one textual column containing a canonical x402 v2 `PaymentRequired` JSON payload. Crudo validates it, returns it as the JSON `402` body, and places the Base64 encoding of that same body in `PAYMENT-REQUIRED`.
+
+The payload requires numeric `x402Version = 2`, object `resource`, and an `accepts` array. Every accept requires textual `scheme`, `network`, `amount`, `asset`, and `payTo`, and integer `maxTimeoutSeconds`. Custom extensions are allowed only as objects with object-valued `{info, schema}`. Crudo only constructs and returns the requirement; it does not verify or settle a payment. Any x402 lookup, type, JSON, or validation failure is a generic `500`.
+
 ## SQLite and PostgreSQL parameters
 
 SQLite uses positional `?` placeholders.

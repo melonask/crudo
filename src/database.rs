@@ -1,9 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde_json::{Map, Value};
 use sqlx::{AnyPool, AssertSqlSafe, Column, Row, TypeInfo, ValueRef, any::AnyPoolOptions};
 
-use crate::config::Config;
+use crate::config::{
+    Config, DatabaseSetup, DatabaseSetupSource, DatabaseSetupSourceFormat, expand_env,
+};
 use crate::server::ClientError;
 
 pub async fn connect(config: &Config) -> Result<AnyPool> {
@@ -19,12 +21,13 @@ pub async fn prepare_database(pool: &AnyPool, config: &Config) -> Result<()> {
     prepare_database_setup(pool, &config.database.setup).await
 }
 
-pub(crate) async fn prepare_database_setup(pool: &AnyPool, setup: &[String]) -> Result<()> {
+pub(crate) async fn prepare_database_setup(pool: &AnyPool, setup: &DatabaseSetup) -> Result<()> {
+    let statements = load_setup_statements(setup).await?;
     let mut transaction = pool
         .begin()
         .await
         .context("could not start database setup transaction")?;
-    for (index, statement) in setup.iter().enumerate() {
+    for (index, statement) in statements.iter().enumerate() {
         sqlx::raw_sql(AssertSqlSafe(statement.as_str()))
             .execute(&mut *transaction)
             .await
@@ -35,6 +38,84 @@ pub(crate) async fn prepare_database_setup(pool: &AnyPool, setup: &[String]) -> 
         .await
         .context("could not commit database setup")?;
     Ok(())
+}
+
+async fn load_setup_statements(setup: &DatabaseSetup) -> Result<Vec<String>> {
+    if setup.is_empty() {
+        return Ok(Vec::new());
+    }
+    match setup {
+        DatabaseSetup::Legacy(statements) => Ok(statements.clone()),
+        DatabaseSetup::Detailed(details) => {
+            let mut statements = details.statements.clone();
+            for source in &details.sources {
+                statements.extend(load_setup_source(source).await?);
+            }
+            Ok(statements)
+        }
+    }
+}
+
+async fn load_setup_source(source: &DatabaseSetupSource) -> Result<Vec<String>> {
+    let location = &source.location;
+    if location.starts_with("http://") {
+        bail!("database setup source must use HTTPS: {location}");
+    }
+    let content = if location.starts_with("https://") {
+        crate::tls::install_crypto_provider();
+        reqwest::get(location)
+            .await
+            .with_context(|| format!("could not fetch database setup source {location}"))?
+            .error_for_status()
+            .with_context(|| format!("could not fetch database setup source {location}"))?
+            .text()
+            .await
+            .with_context(|| format!("could not read database setup source {location}"))?
+    } else {
+        tokio::fs::read_to_string(location)
+            .await
+            .with_context(|| format!("could not read database setup source {location}"))?
+    };
+    let content = expand_env(&content)
+        .with_context(|| format!("could not expand database setup source {location}"))?;
+
+    match source.format {
+        DatabaseSetupSourceFormat::Sql => {
+            if content.trim().is_empty() {
+                bail!("SQL database setup source {location} is empty");
+            }
+            Ok(vec![content])
+        }
+        DatabaseSetupSourceFormat::Json => parse_json_setup_source(location, &content),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JsonSetupObject {
+    statements: Vec<String>,
+}
+
+fn parse_json_setup_source(location: &str, content: &str) -> Result<Vec<String>> {
+    let value: Value = serde_json::from_str(content)
+        .with_context(|| format!("invalid JSON database setup source {location}"))?;
+    let statements = match value {
+        Value::Array(_) => serde_json::from_value(value),
+        Value::Object(_) => serde_json::from_value::<JsonSetupObject>(value)
+            .map(|source| source.statements),
+        _ => bail!(
+            "JSON database setup source {location} must be an array of SQL statements or an object with statements"
+        ),
+    }
+    .with_context(|| format!("invalid JSON database setup source {location}"))?;
+    for (index, statement) in statements.iter().enumerate() {
+        if statement.trim().is_empty() {
+            bail!(
+                "JSON database setup source {location} contains an empty statement at index {index}"
+            );
+        }
+    }
+    Ok(statements)
 }
 
 pub(crate) fn bind<'q>(
@@ -104,8 +185,11 @@ mod tests {
     }
 
     fn example_config() -> Config {
-        let source = include_str!("../config/sqlite.toml");
-        Config::parse(source).unwrap()
+        let source = include_str!("../config/sqlite.toml").replace(
+            "${WALLET_MNEMONIC}",
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        );
+        Config::parse(&source).unwrap()
     }
 
     #[tokio::test]
@@ -128,6 +212,160 @@ mod tests {
         assert!(error.to_string().contains("setup statement 2 failed"));
         let table_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'incomplete'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(table_count, 0);
+    }
+
+    #[tokio::test]
+    async fn local_sql_and_json_sources_execute_in_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let sql = directory.path().join("seed.sql");
+        let json = directory.path().join("seed.json");
+        let json_array = directory.path().join("seed-array.json");
+        tokio::fs::write(&sql, "INSERT INTO entries (value) VALUES ('sql')")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &json,
+            r#"{"statements":["INSERT INTO entries (value) VALUES ('json')"]}"#,
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &json_array,
+            r#"["INSERT INTO entries (value) VALUES ('array')"]"#,
+        )
+        .await
+        .unwrap();
+        let config = Config::parse(&format!(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [database.setup]
+            statements = ["CREATE TABLE entries (value TEXT)", "INSERT INTO entries (value) VALUES ('inline')"]
+            sources = [
+                {{ location = "{}", format = "sql" }},
+                {{ location = "{}", format = "json" }},
+                {{ location = "{}", format = "json" }},
+            ]
+            "#,
+            sql.display(),
+            json.display(),
+            json_array.display(),
+        ))
+        .unwrap();
+        let pool = memory_pool().await;
+
+        prepare_database(&pool, &config).await.unwrap();
+
+        let values: Vec<String> = sqlx::query_scalar("SELECT value FROM entries ORDER BY rowid")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(values, ["inline", "sql", "json", "array"]);
+    }
+
+    #[tokio::test]
+    async fn invalid_json_source_shape_includes_its_location() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        tokio::fs::write(file.path(), r#"{"sql":"SELECT 1"}"#)
+            .await
+            .unwrap();
+        let config = Config::parse(&format!(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+            [database.setup]
+            sources = [{{ location = "{}", format = "json" }}]
+            "#,
+            file.path().display(),
+        ))
+        .unwrap();
+
+        let error = prepare_database(&memory_pool().await, &config)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains(&file.path().display().to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_http_database_source_is_rejected() {
+        let config = Config::parse(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+            [database.setup]
+            sources = [{ location = "http://example.invalid/setup.sql", format = "sql" }]
+            "#,
+        )
+        .unwrap();
+
+        let error = prepare_database(&memory_pool().await, &config)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("must use HTTPS"));
+    }
+
+    #[tokio::test]
+    async fn empty_sql_source_is_rejected_with_its_location() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        tokio::fs::write(file.path(), " \n\t ").await.unwrap();
+        let config = Config::parse(&format!(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+            [database.setup]
+            sources = [{{ location = "{}", format = "sql" }}]
+            "#,
+            file.path().display(),
+        ))
+        .unwrap();
+
+        let error = prepare_database(&memory_pool().await, &config)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains(&file.path().display().to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn source_statements_are_atomic() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        tokio::fs::write(
+            file.path(),
+            "CREATE TABLE source_incomplete (id INTEGER PRIMARY KEY); INVALID SQL",
+        )
+        .await
+        .unwrap();
+        let config = Config::parse(&format!(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+            [database.setup]
+            sources = [{{ location = "{}", format = "sql" }}]
+            "#,
+            file.path().display(),
+        ))
+        .unwrap();
+        let pool = memory_pool().await;
+
+        assert!(prepare_database(&pool, &config).await.is_err());
+        let table_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'source_incomplete'",
         )
         .fetch_one(&pool)
         .await

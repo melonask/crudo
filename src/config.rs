@@ -37,16 +37,61 @@ pub(crate) struct Database {
     #[serde(default = "default_database_url")]
     pub(crate) url: String,
     #[serde(default)]
-    pub(crate) setup: Vec<String>,
+    pub(crate) setup: DatabaseSetup,
 }
 
 impl Default for Database {
     fn default() -> Self {
         Self {
             url: default_database_url(),
-            setup: Vec::new(),
+            setup: DatabaseSetup::default(),
         }
     }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum DatabaseSetup {
+    Legacy(Vec<String>),
+    Detailed(DatabaseSetupDetails),
+}
+
+impl DatabaseSetup {
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            Self::Legacy(statements) => statements.is_empty(),
+            Self::Detailed(details) => details.statements.is_empty() && details.sources.is_empty(),
+        }
+    }
+}
+
+impl Default for DatabaseSetup {
+    fn default() -> Self {
+        Self::Legacy(Vec::new())
+    }
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DatabaseSetupDetails {
+    #[serde(default)]
+    pub(crate) statements: Vec<String>,
+    #[serde(default)]
+    pub(crate) sources: Vec<DatabaseSetupSource>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DatabaseSetupSource {
+    pub(crate) location: String,
+    pub(crate) format: DatabaseSetupSourceFormat,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DatabaseSetupSourceFormat {
+    Sql,
+    Json,
 }
 
 fn default_database_url() -> String {
@@ -266,6 +311,16 @@ pub(crate) struct ActionError {
     pub(crate) database_message: String,
     pub(crate) status: u16,
     pub(crate) message: String,
+    pub(crate) x402: Option<ActionX402>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ActionX402 {
+    pub(crate) sql: String,
+    #[serde(default)]
+    pub(crate) params: Vec<String>,
+    pub(crate) column: String,
 }
 
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -373,7 +428,7 @@ pub async fn load_config(location: &str) -> Result<Config> {
     toml::from_str(&source).with_context(|| format!("invalid configuration in {location}"))
 }
 
-fn expand_env(source: &str) -> Result<String> {
+pub(crate) fn expand_env(source: &str) -> Result<String> {
     let mut expanded = String::with_capacity(source.len());
     let mut rest = source;
     while let Some(start) = rest.find("${") {
@@ -457,9 +512,50 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.database.url, "sqlite://crudo.db?mode=rwc");
-        assert_eq!(
-            config.database.setup,
-            ["CREATE TABLE entries (id INTEGER PRIMARY KEY)"]
+        match config.database.setup {
+            DatabaseSetup::Legacy(statements) => {
+                assert_eq!(
+                    statements,
+                    ["CREATE TABLE entries (id INTEGER PRIMARY KEY)"]
+                );
+            }
+            DatabaseSetup::Detailed(_) => panic!("legacy setup parsed as detailed setup"),
+        }
+    }
+
+    #[test]
+    fn detailed_database_setup_parses_strictly() {
+        let config = Config::parse(
+            r#"
+            [database.setup]
+            statements = ["CREATE TABLE entries (id INTEGER PRIMARY KEY)"]
+            sources = [{ location = "seed.json", format = "json" }]
+            "#,
+        )
+        .unwrap();
+
+        let DatabaseSetup::Detailed(setup) = config.database.setup else {
+            panic!("detailed setup parsed as legacy setup");
+        };
+        assert_eq!(setup.statements.len(), 1);
+        assert_eq!(setup.sources.len(), 1);
+        assert!(
+            Config::parse(
+                r#"
+            [database.setup]
+            unknown = true
+            "#
+            )
+            .is_err()
+        );
+        assert!(
+            Config::parse(
+                r#"
+            [database.setup]
+            sources = [{ location = "seed.sql", format = "sql", unknown = true }]
+            "#
+            )
+            .is_err()
         );
     }
 

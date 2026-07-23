@@ -31,7 +31,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use rand::RngExt;
 use serde_json::{Map, Value, json};
 use sha2::Sha256;
-use sqlx::{AnyPool, AssertSqlSafe};
+use sqlx::{AnyPool, AssertSqlSafe, Row};
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{
     cors::{AllowOrigin, Any, CorsLayer},
@@ -144,9 +144,21 @@ impl fmt::Display for RateLimited {
 impl std::error::Error for RateLimited {}
 
 #[derive(Debug)]
+struct X402ConstructionFailed(String);
+
+impl fmt::Display for X402ConstructionFailed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for X402ConstructionFailed {}
+
+#[derive(Debug)]
 pub(crate) struct ClientError {
     status: StatusCode,
     message: String,
+    x402: Option<Value>,
 }
 
 impl ClientError {
@@ -154,6 +166,7 @@ impl ClientError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
+            x402: None,
         }
     }
 }
@@ -190,6 +203,17 @@ pub fn build_router(pool: AnyPool, config: Config) -> Result<Router> {
             })?;
             if !status.is_client_error() && !status.is_server_error() {
                 bail!("action {name} error status must be between 400 and 599");
+            }
+            if error.x402.is_some() && status != StatusCode::PAYMENT_REQUIRED {
+                bail!("action {name} x402 error mapping must have status 402");
+            }
+            if let Some(x402) = &error.x402 {
+                if x402.column.is_empty() {
+                    bail!("action {name} x402 column must not be empty");
+                }
+                if x402.params.iter().any(String::is_empty) {
+                    bail!("action {name} x402 parameters must not be empty");
+                }
             }
         }
         if let Some(stage) = &action.wallets {
@@ -465,6 +489,22 @@ fn error_response(error: anyhow::Error) -> Response {
     } else if error.downcast_ref::<AltchaRejected>().is_some() {
         (StatusCode::FORBIDDEN, error.to_string())
     } else if let Some(error) = error.downcast_ref::<ClientError>() {
+        if let Some(payload) = &error.x402 {
+            let bytes = match serde_json::to_vec(payload) {
+                Ok(bytes) => bytes,
+                Err(error) => return error_response(error.into()),
+            };
+            let mut response = (StatusCode::PAYMENT_REQUIRED, bytes.clone()).into_response();
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            response.headers_mut().insert(
+                "PAYMENT-REQUIRED",
+                HeaderValue::from_str(&BASE64.encode(bytes))
+                    .expect("base64 is a valid header value"),
+            );
+            return response;
+        }
         (error.status, error.message.clone())
     } else if let Some(error) = error.downcast_ref::<sqlx::Error>() {
         match error {
@@ -501,7 +541,12 @@ fn error_response(error: anyhow::Error) -> Response {
     response
 }
 
-fn action_error(error: sqlx::Error, action: &Action) -> anyhow::Error {
+async fn action_error(
+    error: sqlx::Error,
+    action: &Action,
+    pool: &AnyPool,
+    input: &Map<String, Value>,
+) -> anyhow::Error {
     let response = error.as_database_error().and_then(|database| {
         action
             .errors
@@ -509,13 +554,97 @@ fn action_error(error: sqlx::Error, action: &Action) -> anyhow::Error {
             .find(|response| response.database_message == database.message())
     });
     match response {
-        Some(response) => ClientError {
-            status: StatusCode::from_u16(response.status).expect("error status was validated"),
-            message: response.message.clone(),
+        Some(response) => {
+            let x402 = match &response.x402 {
+                Some(x402) => match x402_payload(x402, pool, input).await {
+                    Ok(payload) => Some(payload),
+                    Err(error) => {
+                        return X402ConstructionFailed(format!(
+                            "could not construct x402 payment requirement: {error:#}"
+                        ))
+                        .into();
+                    }
+                },
+                None => None,
+            };
+            ClientError {
+                status: StatusCode::from_u16(response.status).expect("error status was validated"),
+                message: response.message.clone(),
+                x402,
+            }
+            .into()
         }
-        .into(),
         None => error.into(),
     }
+}
+
+async fn x402_payload(
+    x402: &crate::config::ActionX402,
+    pool: &AnyPool,
+    input: &Map<String, Value>,
+) -> Result<Value> {
+    let mut query = sqlx::query(AssertSqlSafe(x402.sql.as_str()));
+    for name in &x402.params {
+        let value = input
+            .get(name)
+            .with_context(|| format!("x402 missing parameter {name}"))?;
+        query = bind(query, value)?;
+    }
+    let row = query.fetch_one(pool).await.context("x402 query failed")?;
+    let payload: String = row
+        .try_get(x402.column.as_str())
+        .with_context(|| format!("x402 query has no string column {}", x402.column))?;
+    let payload = serde_json::from_str(&payload).context("x402 payload is not JSON")?;
+    validate_x402_payload(&payload)?;
+    Ok(payload)
+}
+
+fn validate_x402_payload(payload: &Value) -> Result<()> {
+    let root = payload
+        .as_object()
+        .context("x402 payload must be an object")?;
+    if root.get("x402Version").and_then(Value::as_u64) != Some(2) {
+        bail!("x402 payload x402Version must be numeric 2");
+    }
+    if !root.get("resource").is_some_and(Value::is_object) {
+        bail!("x402 payload resource must be an object");
+    }
+    let accepts = root
+        .get("accepts")
+        .and_then(Value::as_array)
+        .context("x402 payload accepts must be an array")?;
+    for accept in accepts {
+        let accept = accept
+            .as_object()
+            .context("x402 accept must be an object")?;
+        for field in ["scheme", "network", "amount", "asset", "payTo"] {
+            if !accept.get(field).is_some_and(Value::is_string) {
+                bail!("x402 accept {field} must be a string");
+            }
+        }
+        if !accept
+            .get("maxTimeoutSeconds")
+            .is_some_and(|value| value.as_u64().is_some())
+        {
+            bail!("x402 accept maxTimeoutSeconds must be a nonnegative integer");
+        }
+    }
+    if let Some(extensions) = root.get("extensions") {
+        let extensions = extensions
+            .as_object()
+            .context("x402 extensions must be an object")?;
+        for extension in extensions.values() {
+            let extension = extension
+                .as_object()
+                .context("x402 extension must be an object")?;
+            for field in ["info", "schema"] {
+                if !extension.get(field).is_some_and(Value::is_object) {
+                    bail!("x402 extension {field} must be an object");
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn altcha_challenge(
@@ -666,12 +795,17 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
             .begin()
             .await
             .context("could not start wallet action transaction")?;
-        let value = row_to_json(
-            query
-                .fetch_one(&mut *transaction)
-                .await
-                .map_err(|error| action_error(error, action))?,
-        )?;
+        let row = match query.fetch_one(&mut *transaction).await {
+            Ok(row) => row,
+            Err(error) => {
+                transaction
+                    .rollback()
+                    .await
+                    .context("could not roll back wallet action transaction")?;
+                return Err(action_error(error, action, &state.pool, &input).await);
+            }
+        };
+        let value = row_to_json(row)?;
         let path_values = wallet_path_values(&wallets.values, &value)?;
         let profiles: Vec<_> = if let Some(profile) = selected_profile {
             vec![profile]
@@ -698,10 +832,16 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
             for value in &values {
                 insert = bind(insert, value)?;
             }
-            let result = insert
-                .execute(&mut *transaction)
-                .await
-                .map_err(|error| action_error(error, action))?;
+            let result = match insert.execute(&mut *transaction).await {
+                Ok(result) => result,
+                Err(error) => {
+                    transaction
+                        .rollback()
+                        .await
+                        .context("could not roll back wallet action transaction")?;
+                    return Err(action_error(error, action, &state.pool, &input).await);
+                }
+            };
             if result.rows_affected() != 1 {
                 bail!("wallet persistence must affect exactly one row");
             }
@@ -714,34 +854,45 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
     } else {
         match action.result {
             ResultMode::Execute => {
-                let result = query
-                    .execute(&state.pool)
-                    .await
-                    .map_err(|error| action_error(error, action))?;
+                let result = match query.execute(&state.pool).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        return Err(action_error(error, action, &state.pool, &input).await);
+                    }
+                };
                 json!({ "rows_affected": result.rows_affected() })
             }
-            ResultMode::One => row_to_json(
-                query
-                    .fetch_one(&state.pool)
-                    .await
-                    .map_err(|error| action_error(error, action))?,
-            )?,
-            ResultMode::Optional => query
-                .fetch_optional(&state.pool)
-                .await
-                .map_err(|error| action_error(error, action))?
-                .map(row_to_json)
-                .transpose()?
-                .unwrap_or(Value::Null),
-            ResultMode::Many => Value::Array(
-                query
-                    .fetch_all(&state.pool)
-                    .await
-                    .map_err(|error| action_error(error, action))?
-                    .into_iter()
-                    .map(row_to_json)
-                    .collect::<Result<Vec<_>>>()?,
-            ),
+            ResultMode::One => {
+                let row = match query.fetch_one(&state.pool).await {
+                    Ok(row) => row,
+                    Err(error) => {
+                        return Err(action_error(error, action, &state.pool, &input).await);
+                    }
+                };
+                row_to_json(row)?
+            }
+            ResultMode::Optional => {
+                let row = match query.fetch_optional(&state.pool).await {
+                    Ok(row) => row,
+                    Err(error) => {
+                        return Err(action_error(error, action, &state.pool, &input).await);
+                    }
+                };
+                row.map(row_to_json).transpose()?.unwrap_or(Value::Null)
+            }
+            ResultMode::Many => {
+                let rows = match query.fetch_all(&state.pool).await {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        return Err(action_error(error, action, &state.pool, &input).await);
+                    }
+                };
+                Value::Array(
+                    rows.into_iter()
+                        .map(row_to_json)
+                        .collect::<Result<Vec<_>>>()?,
+                )
+            }
         }
     };
     let status = action

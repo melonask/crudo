@@ -17,9 +17,34 @@ Dynamic action names and wallet `values` keys remain user-defined map keys.
 | Field | Required | Default | Validation / behavior |
 |---|---|---|---|
 | `database.url` | No | `sqlite://crudo.db?mode=rwc` | SQLx SQLite or PostgreSQL connection URL. |
-| `database.setup` | No | `[]` | Statements run atomically before serving. |
+| `database.setup` | No | `[]` | Legacy inline statement array, or the detailed setup table described below. All loaded statements run atomically before serving. |
 
 Omitting `[database]` selects the local SQLite URL above and runs no setup statements. It does not create application tables; define `database.setup` or manage the schema separately when routes need tables.
+
+### Database setup sources
+
+The legacy form remains valid:
+
+```toml
+[database]
+setup = ["CREATE TABLE entries (id INTEGER PRIMARY KEY)"]
+```
+
+For inline statements plus ordered files or HTTPS sources, use the detailed form. Inline statements run first, followed by each `sources` entry in listed order. Configuration and every loaded source expand `${NAME}` environment variables; an unset, empty-name, or unclosed reference fails startup.
+
+```toml
+[database]
+url = "sqlite://app.db?mode=rwc"
+
+[database.setup]
+statements = ["CREATE TABLE entries (id INTEGER PRIMARY KEY, body TEXT NOT NULL)"]
+sources = [
+  { location = "schema/seed.sql", format = "sql" },
+  { location = "https://config.example.test/entries.json", format = "json" },
+]
+```
+
+`location` is a local text-file path or an HTTPS URL; plain HTTP is rejected. A `sql` source must be nonempty and is executed as one raw SQL batch. A `json` source must be either an array of nonempty SQL strings or a strict object containing only `{"statements":[...]}`. Crudo loads and validates every source before beginning one transaction, then executes the resulting statements in order; a failure rolls back the setup transaction.
 
 ## Server and CORS
 
@@ -70,6 +95,26 @@ Server limits apply by default. `[endpoints.limits]` accepts optional versions o
 | `actions.NAME.errors` | No | `[]` | Configured database-message mappings. |
 
 Each `[[actions.NAME.errors]]` entry requires `database_message`, a 400–599 `status`, and response `message`.
+
+### x402 payment-required errors
+
+An error mapping may add an x402 lookup with `[actions.NAME.errors.x402]` (immediately after the relevant `[[actions.NAME.errors]]` entry):
+
+```toml
+[[actions.purchase.errors]]
+database_message = "insufficient balance"
+status = 402
+message = "insufficient balance"
+
+[actions.purchase.errors.x402]
+sql = "SELECT payment_required FROM payment_requirements WHERE product_id = ?"
+params = ["product_id"]
+column = "payment_required"
+```
+
+`x402` is valid only on a `402` mapping. Its SQL receives named input values in `params` order and must return one row whose named `column` is textual JSON for a canonical x402 v2 `PaymentRequired` payload. Crudo validates `x402Version: 2`, an object `resource`, an `accepts` array whose entries contain textual `scheme`, `network`, `amount`, `asset`, and `payTo` plus nonnegative integer `maxTimeoutSeconds`. If present, `extensions` must be an object and every extension must contain object-valued `info` and `schema`.
+
+On a valid lookup, Crudo returns that payload as the `402` JSON body and Base64-encodes the same JSON in `PAYMENT-REQUIRED`. It does not process payment. A missing parameter, query/row/column/type failure, invalid JSON, or invalid payload is an x402 construction failure and becomes a generic `500` response.
 
 ## Authentication
 

@@ -1,12 +1,12 @@
 use anyhow::Result;
 use sqlx::AnyPool;
 
-use crate::{Config, build_router, database::prepare_database_setup};
+use crate::{Config, build_router, config::DatabaseSetup, database::prepare_database_setup};
 
 /// Builds and serves the configured application until an OS shutdown signal arrives.
 pub async fn run(pool: AnyPool, config: Config) -> Result<()> {
     let address = config.server.address.clone();
-    let setup = config.database.setup.clone();
+    let setup: DatabaseSetup = config.database.setup.clone();
     let app = build_router(pool.clone(), config)?;
     prepare_database_setup(&pool, &setup).await?;
     let listener = tokio::net::TcpListener::bind(&address).await?;

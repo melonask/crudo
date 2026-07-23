@@ -1,9 +1,9 @@
 # Shipped store API
 
-`config/sqlite.toml` and `config/postgres.toml` are digital-store bootstraps. Both explicitly set `prefix = "v1"`; every route here is served under `/v1`. They seed four active products and demo-only `admin` / `admin` idempotently without overwriting edits. Change or remove that account before deployment.
+`config/sqlite.toml` and `config/postgres.toml` are digital-store bootstraps. Both require `WALLET_MNEMONIC`; PostgreSQL also requires `DATABASE_URL`. Both explicitly set `prefix = "v1"`; every route here is served under `/v1`. They seed four active products and demo-only `admin` / `admin` idempotently without overwriting edits. Change or remove that account before deployment.
 
 ::: warning Development only
-Self-service top-ups create demo credit without payment-provider verification. Product and transaction setup is a demo bootstrap, not migration tooling or real payment processing. Do not expose it as-is.
+Each registration derives and persists Base and Solana user wallets. Self-service top-ups create demo credit without payment-provider verification. Insufficient purchases return a configured x402 `402` requirement; Crudo does not verify or settle its payments. Product and transaction setup is a demo bootstrap, not migration tooling or real payment processing. Do not expose it as-is.
 :::
 
 ## Routes
@@ -50,7 +50,7 @@ A purchase needs its own `external_id` and an active `product_id`:
 {"external_id":"order-001","product_id":1}
 ```
 
-`external_id` is unique across transactions, so it is the idempotency key: do not generate a new value when retrying the same intended operation. A confirmed top-up credits once; a confirmed purchase debits once and rejects insufficient balance with `422`. Purchases snapshot product name, fulfillment, and a generated license key into the buyer’s transaction. Those fulfillment and license fields are not public product data and are visible only to the buyer or an administrator through transaction routes.
+`external_id` is unique across transactions, so it is the idempotency key: do not generate a new value when retrying the same intended operation. A confirmed top-up credits once; a confirmed purchase debits once and rejects insufficient balance with `402`. Its configured x402 v2 payload accepts GLOBAL exact Base USDC and includes user-specific deposit destinations as informational extension data. It is a payment requirement only: Crudo does not verify or settle x402 payments, and `/v1/top-ups` remains demo credit. Purchases snapshot product name, fulfillment, and a generated license key into the buyer’s transaction. Those fulfillment and license fields are not public product data and are visible only to the buyer or an administrator through transaction routes.
 
 `GET /v1/transactions` is owner-scoped. `GET /v1/products` returns only active products and deliberately omits fulfillment and license information.
 

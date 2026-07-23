@@ -7,7 +7,7 @@ use axum::{
         Request, StatusCode,
         header::{
             ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_METHOD, AUTHORIZATION,
-            CACHE_CONTROL, ORIGIN,
+            CACHE_CONTROL, CONTENT_TYPE, HeaderName, ORIGIN,
         },
     },
 };
@@ -66,6 +66,10 @@ sql = "SELECT ? AS value"
 params = ["value"]
 result = "one"
 "#;
+
+const TEST_WALLET_MNEMONIC: &str =
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+const PAYMENT_REQUIRED: HeaderName = HeaderName::from_static("payment-required");
 
 const OPTIONAL_AUTH_CONFIG: &str = r#"
 [server.limits]
@@ -214,6 +218,78 @@ user_id = "$result.id"
 address_index = "0"
 "#;
 
+const X402_CONFIG: &str = r#"
+[server.limits]
+requests = 0
+
+[database]
+url = "sqlite::memory:"
+
+[auth.bearer]
+sql = "SELECT user_id FROM sessions WHERE token = ?"
+owner = "user_id"
+
+[[endpoints]]
+method = "POST"
+path = "/paid"
+action = "paid"
+auth = ["bearer"]
+
+[[endpoints]]
+method = "GET"
+path = "/mapped"
+action = "mapped"
+
+[actions.paid]
+sql = "INSERT INTO attempts (owner) VALUES (?)"
+params = ["$owner"]
+
+[[actions.paid.errors]]
+database_message = "UNIQUE constraint failed: attempts.owner"
+status = 402
+message = "payment required"
+
+[actions.paid.errors.x402]
+sql = '''SELECT CASE ? WHEN 1 THEN '{"x402Version":2,"resource":{"url":"/paid"},"accepts":[{"scheme":"exact","network":"eip155:1","amount":"100","asset":"USDC","payTo":"alice","maxTimeoutSeconds":60}],"extensions":{"topUp":{"info":{"owner":1},"schema":{"type":"object"}}}}' WHEN 2 THEN '{"x402Version":2,"resource":{"url":"/paid"},"accepts":[{"scheme":"custom","network":"example:net","amount":"200","asset":"CRED","payTo":"bob","maxTimeoutSeconds":0}],"extensions":{"topUp":{"info":{"owner":2},"schema":{"type":"object"}}}}' END AS payload'''
+params = ["$owner"]
+column = "payload"
+
+[actions.mapped]
+sql = "SELECT * FROM missing"
+
+[[actions.mapped.errors]]
+database_message = "no such table: missing"
+status = 409
+message = "existing mapping"
+"#;
+
+async fn x402_app(payload_version: u8) -> axum::Router {
+    x402_app_with_source(X402_CONFIG.replace(
+        "\"x402Version\":2",
+        &format!("\"x402Version\":{payload_version}"),
+    ))
+    .await
+}
+
+async fn x402_app_with_source(source: String) -> axum::Router {
+    sqlx::any::install_default_drivers();
+    let pool = AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE sessions (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL);
+         CREATE TABLE attempts (owner INTEGER UNIQUE NOT NULL);
+         INSERT INTO sessions VALUES ('alice-token', 1), ('bob-token', 2);
+         INSERT INTO attempts VALUES (1), (2);",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    build_router(pool, Config::parse(&source).unwrap()).unwrap()
+}
+
 async fn app() -> axum::Router {
     sqlx::any::install_default_drivers();
     let pool: AnyPool = AnyPoolOptions::new()
@@ -356,6 +432,108 @@ async fn endpoint_rate_limits_are_independent() {
 }
 
 #[tokio::test]
+async fn mapped_x402_uses_owner_specific_payload_and_matching_header() {
+    let app = x402_app(2).await;
+    for (token, pay_to, owner) in [("alice-token", "alice", 1), ("bob-token", "bob", 2)] {
+        let response = app
+            .clone()
+            .oneshot(authorized_request(
+                "POST",
+                "/paid",
+                &format!("Bearer {token}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        let header = BASE64
+            .decode(
+                response
+                    .headers()
+                    .get("PAYMENT-REQUIRED")
+                    .unwrap()
+                    .as_bytes(),
+            )
+            .unwrap();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(header, body);
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["accepts"][0]["payTo"], pay_to);
+        assert_eq!(payload["extensions"]["topUp"]["info"]["owner"], owner);
+        assert!(payload["extensions"]["topUp"]["schema"].is_object());
+    }
+}
+
+#[tokio::test]
+async fn malformed_x402_payload_is_an_internal_error() {
+    let response = x402_app(3)
+        .await
+        .oneshot(authorized_request("POST", "/paid", "Bearer alice-token"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn x402_query_without_a_row_is_an_internal_error() {
+    let source = X402_CONFIG.replace("END AS payload'''", "END AS payload WHERE 0'''");
+    let response = x402_app_with_source(source)
+        .await
+        .oneshot(authorized_request("POST", "/paid", "Bearer alice-token"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn existing_non_x402_database_mapping_is_unchanged() {
+    let response = x402_app(2)
+        .await
+        .oneshot(request("GET", "/mapped", Body::empty()))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        json_response(response).await,
+        json!({ "error": "existing mapping" })
+    );
+}
+
+#[tokio::test]
+async fn x402_must_be_configured_on_a_402_error_mapping() {
+    sqlx::any::install_default_drivers();
+    let source = X402_CONFIG.replace("status = 402", "status = 409");
+    let pool = AnyPoolOptions::new()
+        .connect_lazy("sqlite::memory:")
+        .unwrap();
+
+    assert!(build_router(pool, Config::parse(&source).unwrap()).is_err());
+}
+
+#[tokio::test]
+async fn x402_column_and_parameters_must_not_be_empty() {
+    sqlx::any::install_default_drivers();
+    for source in [
+        X402_CONFIG.replace("column = \"payload\"", "column = \"\""),
+        X402_CONFIG.replace(
+            "params = [\"$owner\"]\ncolumn = \"payload\"",
+            "params = [\"\"]\ncolumn = \"payload\"",
+        ),
+    ] {
+        let pool = AnyPoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+        assert!(build_router(pool, Config::parse(&source).unwrap()).is_err());
+    }
+}
+
+#[tokio::test]
 async fn authenticated_clients_can_bypass_altcha_when_configured() {
     sqlx::any::install_default_drivers();
     let pool = AnyPoolOptions::new()
@@ -459,6 +637,8 @@ async fn sqlite_store_demo_lifecycle_enforces_ownership_and_admin_access() {
     let bob = register(&app, &format!("bob-{suffix}@example.test")).await;
     let alice_token = login(&app, &alice, "secret").await;
     let bob_token = login(&app, &bob, "secret").await;
+    let alice_id = me(&app, &alice_token).await["id"].as_i64().unwrap();
+    let bob_id = me(&app, &bob_token).await["id"].as_i64().unwrap();
 
     for path in [
         "/v1/admin/summary",
@@ -604,12 +784,21 @@ async fn sqlite_store_demo_lifecycle_enforces_ownership_and_admin_access() {
     );
 
     let rejected = app.clone().oneshot(authorized_json_request("POST", "/v1/purchases", &alice_token, json!({"external_id":format!("too-expensive-{suffix}"),"product_id":products.iter().find(|product| product["price"] == 4999).unwrap()["id"]}))).await.unwrap();
-    assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(rejected.status(), StatusCode::PAYMENT_REQUIRED);
+    let alice_destinations =
+        assert_store_payment_required(payment_required_payload(rejected).await, alice_id);
+    let bob_rejected = app.clone().oneshot(authorized_json_request("POST", "/v1/purchases", &bob_token, json!({"external_id":format!("bob-too-expensive-{suffix}"),"product_id":products.iter().find(|product| product["price"] == 4999).unwrap()["id"]}))).await.unwrap();
+    assert_eq!(bob_rejected.status(), StatusCode::PAYMENT_REQUIRED);
+    let bob_destinations =
+        assert_store_payment_required(payment_required_payload(bob_rejected).await, bob_id);
+    assert_ne!(alice_destinations, bob_destinations);
     assert_eq!(me_balance(&app, &alice_token).await, 3_701);
 }
 
 fn example_sqlite_config(database_url: &str) -> String {
-    include_str!("../config/sqlite.toml").replace("sqlite://crudo-store.db?mode=rwc", database_url)
+    include_str!("../config/sqlite.toml")
+        .replace("sqlite://crudo-store.db?mode=rwc", database_url)
+        .replace("${WALLET_MNEMONIC}", TEST_WALLET_MNEMONIC)
 }
 
 fn authorized_json_request(method: &str, uri: &str, token: &str, body: Value) -> Request<Body> {
@@ -673,6 +862,10 @@ async fn top_up(app: &axum::Router, token: &str, external_id: &str, amount: i64)
 }
 
 async fn me_balance(app: &axum::Router, token: &str) -> i64 {
+    me(app, token).await["balance"].as_i64().unwrap()
+}
+
+async fn me(app: &axum::Router, token: &str) -> Value {
     let response = app
         .clone()
         .oneshot(authorized_request(
@@ -683,7 +876,71 @@ async fn me_balance(app: &axum::Router, token: &str) -> i64 {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    json_response(response).await["balance"].as_i64().unwrap()
+    json_response(response).await
+}
+
+async fn payment_required_payload(response: axum::response::Response) -> Value {
+    let header = response
+        .headers()
+        .get(&PAYMENT_REQUIRED)
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(BASE64.decode(header).unwrap(), body);
+    serde_json::from_slice(&body).unwrap()
+}
+
+fn assert_store_payment_required(payload: Value, user_id: i64) -> Vec<Value> {
+    assert_eq!(payload["x402Version"], 2);
+    let accepts = payload["accepts"].as_array().unwrap();
+    assert_eq!(accepts.len(), 1);
+    assert_eq!(
+        accepts[0],
+        json!({
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "amount": "49990000",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "payTo": "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+            "maxTimeoutSeconds": 60,
+            "extra": { "name": "USDC", "version": "2" },
+        })
+    );
+
+    let deposit = &payload["extensions"]["deposit"];
+    assert!(deposit["info"].is_object());
+    assert!(deposit["schema"].is_object());
+    assert_eq!(deposit["info"]["uid"], user_id.to_string());
+    let destinations = deposit["info"]["destinations"].as_array().unwrap();
+    assert_eq!(destinations.len(), 2);
+    for (network, asset) in [
+        ("eip155:8453", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+        (
+            "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        ),
+    ] {
+        let destination = destinations
+            .iter()
+            .find(|destination| destination["network"] == network)
+            .unwrap();
+        assert_eq!(destination["asset"], asset);
+        assert!(
+            destination["payTo"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+        assert_eq!(destination["minAmount"], "49990000");
+        assert!(destination["minAmount"].is_string());
+    }
+    let schema = &deposit["schema"];
+    assert_eq!(schema["additionalProperties"], false);
+    assert_eq!(
+        schema["properties"]["destinations"]["items"]["additionalProperties"],
+        false
+    );
+    destinations.to_vec()
 }
 
 #[tokio::test]

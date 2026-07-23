@@ -108,14 +108,14 @@ Invalid routes, action references, protection settings, and static configuration
 ::: info Wallet requirements are conditional
 Wallets are optional: `WALLET_MNEMONIC` is not required by crudo or by configurations that omit `[wallets]` and wallet action stages.
 
-Wallet and ALTCHA features are independent of the shipped store configurations. A wallet passphrase defaults to an empty string when wallets are configured.
+ALTCHA is independent of the shipped store configurations. Both store configurations use wallet stages and require `WALLET_MNEMONIC`; a wallet passphrase defaults to an empty string when wallets are configured.
 :::
 
 | Configuration | Database and scope | Required environment |
 |---|---|---|
 | `config/minimal.toml` | Explicit local SQLite health and item CRUD example; `prefix = "v1"` | None |
-| `config/sqlite.toml` | Local digital-store bootstrap; creates `crudo-store.db`; `prefix = "v1"` | None |
-| `config/postgres.toml` | PostgreSQL digital-store bootstrap; `prefix = "v1"` | `DATABASE_URL` |
+| `config/sqlite.toml` | Local digital-store bootstrap; creates `crudo-store.db`; `prefix = "v1"` | `WALLET_MNEMONIC` |
+| `config/postgres.toml` | PostgreSQL digital-store bootstrap; `prefix = "v1"` | `DATABASE_URL`, `WALLET_MNEMONIC` |
 
 ## Choose your next step
 

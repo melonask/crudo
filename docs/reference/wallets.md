@@ -3,7 +3,7 @@
 ::: info Wallets are optional
 `[wallets]` is not globally required. It is required only for a referenced wallet action, so non-wallet APIs should omit both `[wallets]` and wallet stages.
 
-`${WALLET_MNEMONIC}` makes that variable required only in configurations that reference it. `passphrase` defaults to an empty string. The shipped store configurations do not configure wallets.
+`${WALLET_MNEMONIC}` makes that variable required only in configurations that reference it. `passphrase` defaults to an empty string. Both shipped store configurations configure wallets and therefore require `WALLET_MNEMONIC`; registration derives and persists one Base and one Solana address for each user.
 :::
 
 Wallets derive public addresses from a BIP-39 mnemonic and optional passphrase. Private keys are not stored.
