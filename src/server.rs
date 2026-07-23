@@ -39,8 +39,10 @@ use tower_http::{
 };
 
 use crate::{
-    config::{Action, Altcha, AuthMethod, Authentication, Config, Cors, ResultMode},
-    database::{bind, row_to_json},
+    config::{
+        Action, Altcha, AuthMethod, Authentication, Config, Cors, DatabaseBackend, ResultMode,
+    },
+    database::{bind, row_to_json, row_to_json_with_booleans},
     wallet::{WalletGenerator, path_placeholders},
 };
 
@@ -48,6 +50,7 @@ struct Route {
     action: String,
     auth: Vec<AuthMethod>,
     auth_optional: bool,
+    roles: Vec<String>,
     altcha: bool,
     altcha_for_authenticated: bool,
     rate_limit: RateLimit,
@@ -68,6 +71,7 @@ struct AppState {
     actions: HashMap<String, Action>,
     routes: HashMap<(Method, String), Route>,
     auth: Authentication,
+    backend: DatabaseBackend,
     altcha: Option<Altcha>,
     wallets: Option<WalletGenerator>,
     used_challenges: Mutex<HashMap<String, u64>>,
@@ -120,6 +124,17 @@ impl fmt::Display for Unauthorized {
 }
 
 impl std::error::Error for Unauthorized {}
+
+#[derive(Debug)]
+struct Forbidden;
+
+impl fmt::Display for Forbidden {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("insufficient role")
+    }
+}
+
+impl std::error::Error for Forbidden {}
 
 #[derive(Debug)]
 struct AltchaRejected;
@@ -184,6 +199,7 @@ pub fn build_router(pool: AnyPool, config: Config) -> Result<Router> {
         bail!("no endpoints configured");
     }
 
+    let backend = config.database.backend;
     let wallets = config.wallets.map(WalletGenerator::new).transpose()?;
     let default_limits = config.server.limits;
     let prefix = config.server.prefix;
@@ -304,6 +320,9 @@ pub fn build_router(pool: AnyPool, config: Config) -> Result<Router> {
         if !endpoint.altcha_for_authenticated && endpoint.auth.is_empty() {
             bail!("endpoint {method} {path} cannot skip ALTCHA without authentication methods");
         }
+        if !endpoint.roles.is_empty() && (endpoint.auth.is_empty() || endpoint.auth_optional) {
+            bail!("endpoint {method} {path} roles require mandatory authentication");
+        }
         for auth in &endpoint.auth {
             match auth {
                 AuthMethod::Basic if config.auth.basic.is_none() => {
@@ -313,6 +332,25 @@ pub fn build_router(pool: AnyPool, config: Config) -> Result<Router> {
                     bail!("endpoint {path} requires missing [auth.bearer] configuration");
                 }
                 _ => {}
+            }
+            if !endpoint.roles.is_empty() {
+                let role = match auth {
+                    AuthMethod::Basic => config
+                        .auth
+                        .basic
+                        .as_ref()
+                        .and_then(|auth| auth.role.as_ref()),
+                    AuthMethod::Bearer => config
+                        .auth
+                        .bearer
+                        .as_ref()
+                        .and_then(|auth| auth.role.as_ref()),
+                };
+                if role.is_none_or(String::is_empty) {
+                    bail!(
+                        "endpoint {method} {path} roles require a role column for each configured authentication method"
+                    );
+                }
             }
         }
         if routes.contains_key(&(method.clone(), path.clone())) {
@@ -325,6 +363,7 @@ pub fn build_router(pool: AnyPool, config: Config) -> Result<Router> {
                 action: endpoint.action,
                 auth: endpoint.auth,
                 auth_optional: endpoint.auth_optional,
+                roles: endpoint.roles,
                 altcha: endpoint.altcha,
                 altcha_for_authenticated: endpoint.altcha_for_authenticated,
                 rate_limit: RateLimit {
@@ -361,6 +400,7 @@ pub fn build_router(pool: AnyPool, config: Config) -> Result<Router> {
         actions: config.actions,
         routes,
         auth: config.auth,
+        backend,
         altcha: config.altcha,
         wallets,
         used_challenges: Mutex::new(HashMap::new()),
@@ -486,7 +526,9 @@ async fn handle(
 fn error_response(error: anyhow::Error) -> Response {
     let (status, message) = if error.downcast_ref::<Unauthorized>().is_some() {
         (StatusCode::UNAUTHORIZED, error.to_string())
-    } else if error.downcast_ref::<AltchaRejected>().is_some() {
+    } else if error.downcast_ref::<AltchaRejected>().is_some()
+        || error.downcast_ref::<Forbidden>().is_some()
+    {
         (StatusCode::FORBIDDEN, error.to_string())
     } else if let Some(error) = error.downcast_ref::<ClientError>() {
         if let Some(payload) = &error.x402 {
@@ -546,6 +588,7 @@ async fn action_error(
     action: &Action,
     pool: &AnyPool,
     input: &Map<String, Value>,
+    backend: DatabaseBackend,
 ) -> anyhow::Error {
     let response = error.as_database_error().and_then(|database| {
         action
@@ -556,7 +599,7 @@ async fn action_error(
     match response {
         Some(response) => {
             let x402 = match &response.x402 {
-                Some(x402) => match x402_payload(x402, pool, input).await {
+                Some(x402) => match x402_payload(x402, pool, input, backend).await {
                     Ok(payload) => Some(payload),
                     Err(error) => {
                         return X402ConstructionFailed(format!(
@@ -582,8 +625,9 @@ async fn x402_payload(
     x402: &crate::config::ActionX402,
     pool: &AnyPool,
     input: &Map<String, Value>,
+    backend: DatabaseBackend,
 ) -> Result<Value> {
-    let mut query = sqlx::query(AssertSqlSafe(x402.sql.as_str()));
+    let mut query = sqlx::query(AssertSqlSafe(x402.sql.resolve(backend)));
     for name in &x402.params {
         let value = input
             .get(name)
@@ -722,14 +766,14 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
             request.ip,
         )?;
     }
-    let owner = if route.auth.is_empty()
+    let identity = if route.auth.is_empty()
         || (route.auth_optional && !request.headers.contains_key(AUTHORIZATION))
     {
         None
     } else {
         Some(authenticate(&state, &route.auth, &request.headers).await?)
     };
-    if route.altcha && !route.altcha_for_authenticated && owner.is_none() {
+    if route.altcha && !route.altcha_for_authenticated && identity.is_none() {
         verify_altcha(
             &state,
             input
@@ -738,8 +782,16 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
             request.ip,
         )?;
     }
-    if let Some(owner) = owner {
-        input.insert("$owner".into(), owner);
+    if let Some(identity) = identity {
+        if !route.roles.is_empty()
+            && !identity
+                .role
+                .as_ref()
+                .is_some_and(|role| route.roles.contains(role))
+        {
+            return Err(Forbidden.into());
+        }
+        input.insert("$owner".into(), identity.owner);
     }
     if action.params.iter().any(|name| name == "$token") {
         input.insert(
@@ -786,7 +838,7 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
         input.insert(name.clone(), Value::String(hash));
     }
 
-    let mut query = sqlx::query(AssertSqlSafe(action.sql.as_str()));
+    let mut query = sqlx::query(AssertSqlSafe(action.sql.resolve(state.backend)));
     for name in &action.params {
         let value = input
             .get(name)
@@ -811,10 +863,10 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
                     .rollback()
                     .await
                     .context("could not roll back wallet action transaction")?;
-                return Err(action_error(error, action, &state.pool, &input).await);
+                return Err(action_error(error, action, &state.pool, &input, state.backend).await);
             }
         };
-        let value = row_to_json(row)?;
+        let value = row_to_json_with_booleans(row, &action.boolean_columns)?;
         let path_values = wallet_path_values(&wallets.values, &value)?;
         let profiles: Vec<_> = if let Some(profile) = selected_profile {
             vec![profile]
@@ -837,7 +889,7 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
                 .iter()
                 .map(|parameter| wallet_parameter(parameter, &value, profile, &generated))
                 .collect::<Result<Vec<_>>>()?;
-            let mut insert = sqlx::query(AssertSqlSafe(wallets.sql.as_str()));
+            let mut insert = sqlx::query(AssertSqlSafe(wallets.sql.resolve(state.backend)));
             for value in &values {
                 insert = bind(insert, value)?;
             }
@@ -848,7 +900,9 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
                         .rollback()
                         .await
                         .context("could not roll back wallet action transaction")?;
-                    return Err(action_error(error, action, &state.pool, &input).await);
+                    return Err(
+                        action_error(error, action, &state.pool, &input, state.backend).await,
+                    );
                 }
             };
             if result.rows_affected() != 1 {
@@ -866,7 +920,14 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
                 let result = match query.execute(&state.pool).await {
                     Ok(result) => result,
                     Err(error) => {
-                        return Err(action_error(error, action, &state.pool, &input).await);
+                        return Err(action_error(
+                            error,
+                            action,
+                            &state.pool,
+                            &input,
+                            state.backend,
+                        )
+                        .await);
                     }
                 };
                 json!({ "rows_affected": result.rows_affected() })
@@ -875,30 +936,53 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
                 let row = match query.fetch_one(&state.pool).await {
                     Ok(row) => row,
                     Err(error) => {
-                        return Err(action_error(error, action, &state.pool, &input).await);
+                        return Err(action_error(
+                            error,
+                            action,
+                            &state.pool,
+                            &input,
+                            state.backend,
+                        )
+                        .await);
                     }
                 };
-                row_to_json(row)?
+                row_to_json_with_booleans(row, &action.boolean_columns)?
             }
             ResultMode::Optional => {
                 let row = match query.fetch_optional(&state.pool).await {
                     Ok(row) => row,
                     Err(error) => {
-                        return Err(action_error(error, action, &state.pool, &input).await);
+                        return Err(action_error(
+                            error,
+                            action,
+                            &state.pool,
+                            &input,
+                            state.backend,
+                        )
+                        .await);
                     }
                 };
-                row.map(row_to_json).transpose()?.unwrap_or(Value::Null)
+                row.map(|row| row_to_json_with_booleans(row, &action.boolean_columns))
+                    .transpose()?
+                    .unwrap_or(Value::Null)
             }
             ResultMode::Many => {
                 let rows = match query.fetch_all(&state.pool).await {
                     Ok(rows) => rows,
                     Err(error) => {
-                        return Err(action_error(error, action, &state.pool, &input).await);
+                        return Err(action_error(
+                            error,
+                            action,
+                            &state.pool,
+                            &input,
+                            state.backend,
+                        )
+                        .await);
                     }
                 };
                 Value::Array(
                     rows.into_iter()
-                        .map(row_to_json)
+                        .map(|row| row_to_json_with_booleans(row, &action.boolean_columns))
                         .collect::<Result<Vec<_>>>()?,
                 )
             }
@@ -1018,11 +1102,16 @@ fn unix_time() -> u64 {
         .as_secs()
 }
 
+struct AuthenticationResult {
+    owner: Value,
+    role: Option<String>,
+}
+
 async fn authenticate(
     state: &AppState,
     allowed: &[AuthMethod],
     headers: &HeaderMap,
-) -> Result<Value> {
+) -> Result<AuthenticationResult> {
     let authorization = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -1042,7 +1131,7 @@ async fn authenticate(
                     .basic
                     .as_ref()
                     .context("Basic auth is not configured")?;
-                let Some(row) = sqlx::query(AssertSqlSafe(config.sql.as_str()))
+                let Some(row) = sqlx::query(AssertSqlSafe(config.sql.resolve(state.backend)))
                     .bind(username)
                     .fetch_optional(&state.pool)
                     .await?
@@ -1063,10 +1152,18 @@ async fn authenticate(
                 {
                     return Err(Unauthorized.into());
                 }
-                return user
-                    .get(&config.owner)
-                    .cloned()
-                    .ok_or_else(|| Unauthorized.into());
+                let owner = user.get(&config.owner).cloned().ok_or(Unauthorized)?;
+                let role = config
+                    .role
+                    .as_ref()
+                    .map(|column| {
+                        user.get(column)
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                            .ok_or(Unauthorized)
+                    })
+                    .transpose()?;
+                return Ok(AuthenticationResult { owner, role });
             }
             AuthMethod::Bearer => {
                 let Some(token) = authorization.strip_prefix("Bearer ") else {
@@ -1077,7 +1174,7 @@ async fn authenticate(
                     .bearer
                     .as_ref()
                     .context("Bearer auth is not configured")?;
-                let Some(row) = sqlx::query(AssertSqlSafe(config.sql.as_str()))
+                let Some(row) = sqlx::query(AssertSqlSafe(config.sql.resolve(state.backend)))
                     .bind(token)
                     .fetch_optional(&state.pool)
                     .await?
@@ -1085,10 +1182,19 @@ async fn authenticate(
                     return Err(Unauthorized.into());
                 };
                 let session = row_to_json(row)?;
-                return session
-                    .get(&config.owner)
-                    .cloned()
-                    .ok_or_else(|| Unauthorized.into());
+                let owner = session.get(&config.owner).cloned().ok_or(Unauthorized)?;
+                let role = config
+                    .role
+                    .as_ref()
+                    .map(|column| {
+                        session
+                            .get(column)
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                            .ok_or(Unauthorized)
+                    })
+                    .transpose()?;
+                return Ok(AuthenticationResult { owner, role });
             }
         }
     }
@@ -1099,7 +1205,10 @@ async fn authenticate(
 mod tests {
     use super::*;
     use altcha::{SolveChallengeOptions, solve_challenge};
+    use axum::http::Request;
+    use http_body_util::BodyExt;
     use sqlx::any::AnyPoolOptions;
+    use tower::ServiceExt;
 
     #[tokio::test]
     async fn altcha_proof_can_only_be_used_once() {
@@ -1133,6 +1242,7 @@ mod tests {
             actions: HashMap::new(),
             routes: HashMap::new(),
             auth: Authentication::default(),
+            backend: DatabaseBackend::Sqlite,
             altcha: Some(altcha),
             wallets: None,
             used_challenges: Mutex::new(HashMap::new()),
@@ -1179,6 +1289,149 @@ mod tests {
         let response = error_response(RateLimited(42).into());
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(response.headers().get(RETRY_AFTER).unwrap(), "42");
+    }
+
+    #[test]
+    fn forbidden_response_is_a_builtin_client_response() {
+        let response = error_response(Forbidden.into());
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn role_restricted_endpoint_requires_auth_role_columns() {
+        sqlx::any::install_default_drivers();
+        let config = Config::parse(
+            r#"
+            [[endpoints]]
+            method = "GET"
+            path = "/private"
+            action = "private"
+            auth = ["bearer"]
+            roles = ["admin"]
+
+            [actions.private]
+            sql = "SELECT 1"
+
+            [auth.bearer]
+            sql = "SELECT owner FROM sessions WHERE token = $1"
+            owner = "owner"
+            "#,
+        )
+        .unwrap();
+        let pool = AnyPoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+
+        assert!(build_router(pool, config).is_err());
+    }
+
+    #[tokio::test]
+    async fn role_restrictions_allow_matching_authenticated_roles_and_forbid_others() {
+        sqlx::any::install_default_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(AssertSqlSafe(
+            "CREATE TABLE sessions (token TEXT PRIMARY KEY, owner TEXT NOT NULL, role TEXT NOT NULL); \
+             INSERT INTO sessions VALUES ('admin-token', 'admin', 'admin'); \
+             INSERT INTO sessions VALUES ('member-token', 'member', 'member')",
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let config = Config::parse(
+            r#"
+            [[endpoints]]
+            method = "GET"
+            path = "/private"
+            action = "private"
+            auth = ["bearer"]
+            roles = ["admin"]
+
+            [actions.private]
+            sql = "SELECT $1 AS owner"
+            params = ["$owner"]
+
+            [auth.bearer]
+            sql = "SELECT owner, role FROM sessions WHERE token = $1"
+            owner = "owner"
+            role = "role"
+            "#,
+        )
+        .unwrap();
+        let app = build_router(pool, config).unwrap();
+        let request = |token: &str| {
+            let mut request = Request::builder()
+                .uri("/private")
+                .header(AUTHORIZATION, format!("Bearer {token}"))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo("127.0.0.1:3000".parse::<SocketAddr>().unwrap()));
+            request
+        };
+
+        assert_eq!(
+            app.clone()
+                .oneshot(request("admin-token"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.oneshot(request("member-token")).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn action_boolean_columns_convert_sqlite_integer_results() {
+        sqlx::any::install_default_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(AssertSqlSafe(
+            "CREATE TABLE flags (active INTEGER NOT NULL); INSERT INTO flags VALUES (1)",
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let config = Config::parse(
+            r#"
+            [[endpoints]]
+            method = "GET"
+            path = "/flags"
+            action = "flags"
+
+            [actions.flags]
+            sql = "SELECT active FROM flags"
+            result = "one"
+            boolean_columns = ["active"]
+            "#,
+        )
+        .unwrap();
+        let app = build_router(pool, config).unwrap();
+        let mut request = Request::builder()
+            .uri("/flags")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo("127.0.0.1:3000".parse::<SocketAddr>().unwrap()));
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            serde_json::json!({ "active": true })
+        );
     }
 
     #[tokio::test]

@@ -1,0 +1,333 @@
+[server]
+address = "127.0.0.1:3000"
+prefix = "v1"
+[server.cors]
+origins = ["http://127.0.0.1:8000", "http://localhost:8000", "https://demo-crudo.github.io"]
+[server.limits]
+body_bytes = 16384
+timeout_seconds = 10
+concurrency = 16
+requests = 30
+window_seconds = 60
+
+[database]
+url = "${DATABASE_URL}"
+
+[database.setup.sqlite]
+statements = [
+  "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL CHECK (name <> ''), email TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (email <> ''), password TEXT NOT NULL CHECK (password <> ''), role TEXT NOT NULL DEFAULT 'customer' CHECK (role IN ('admin', 'customer')), balance INTEGER NOT NULL DEFAULT 0 CHECK (balance >= 0), created_at INTEGER NOT NULL DEFAULT (unixepoch()))",
+  "CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY CHECK (token <> ''), user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL CHECK (expires_at > 0))",
+  "CREATE TABLE IF NOT EXISTS user_addresses (user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, profile TEXT NOT NULL CHECK (profile IN ('base', 'solana-mainnet')), caip2 TEXT NOT NULL CHECK (caip2 IN ('eip155:8453', 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp')), address_index INTEGER NOT NULL CHECK (address_index >= 0), address TEXT NOT NULL CHECK (address <> ''), derivation_path TEXT NOT NULL CHECK (derivation_path <> ''), PRIMARY KEY (user_id, profile, address_index), UNIQUE (profile, address))",
+  "CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL UNIQUE CHECK (slug <> ''), name TEXT NOT NULL CHECK (name <> ''), description TEXT NOT NULL CHECK (description <> ''), category TEXT NOT NULL CHECK (category IN ('license', 'service', 'book', 'asset')), price INTEGER NOT NULL CHECK (price > 0), active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)), fulfillment TEXT NOT NULL CHECK (fulfillment <> ''), created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()))",
+  "CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, external_id TEXT NOT NULL UNIQUE CHECK (external_id <> ''), user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT, product_id INTEGER REFERENCES products(id) ON DELETE RESTRICT, kind TEXT NOT NULL CHECK (kind IN ('top_up', 'purchase')), status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed')), amount INTEGER NOT NULL CHECK (amount > 0), product_name TEXT, fulfillment TEXT, license_key TEXT UNIQUE, processed_at INTEGER, created_at INTEGER NOT NULL DEFAULT (unixepoch()), CHECK ((kind = 'top_up' AND product_id IS NULL AND product_name IS NULL AND fulfillment IS NULL AND license_key IS NULL) OR (kind = 'purchase' AND product_id IS NOT NULL AND product_name IS NOT NULL AND fulfillment IS NOT NULL AND license_key IS NOT NULL)))",
+  "CREATE TABLE IF NOT EXISTS exact_payment_methods (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL CHECK (scope = 'GLOBAL'), network TEXT NOT NULL CHECK (network <> ''), asset TEXT NOT NULL CHECK (asset <> ''), pay_to TEXT NOT NULL CHECK (pay_to <> ''), timeout_seconds INTEGER NOT NULL CHECK (timeout_seconds > 0), token_name TEXT NOT NULL CHECK (token_name <> ''), token_version INTEGER NOT NULL CHECK (token_version > 0), active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)), UNIQUE (scope, network, asset, pay_to))",
+  "CREATE INDEX IF NOT EXISTS sessions_user_id_index ON sessions (user_id)",
+  "CREATE INDEX IF NOT EXISTS transactions_user_id_index ON transactions (user_id, id DESC)",
+  "CREATE INDEX IF NOT EXISTS transactions_product_id_index ON transactions (product_id)",
+  "CREATE TRIGGER IF NOT EXISTS transaction_process_insert AFTER INSERT ON transactions WHEN NEW.status = 'confirmed' BEGIN SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.user_id) THEN RAISE(ABORT, 'transaction user not found') END; UPDATE users SET balance = balance + CASE NEW.kind WHEN 'top_up' THEN NEW.amount ELSE -NEW.amount END WHERE id = NEW.user_id AND (NEW.kind = 'top_up' OR balance >= NEW.amount); SELECT CASE WHEN changes() <> 1 THEN RAISE(ABORT, 'insufficient balance') END; UPDATE transactions SET processed_at = unixepoch() WHERE id = NEW.id AND processed_at IS NULL; END",
+  "CREATE TRIGGER IF NOT EXISTS transaction_process_update AFTER UPDATE OF status ON transactions WHEN NEW.status = 'confirmed' AND NEW.processed_at IS NULL BEGIN SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.user_id) THEN RAISE(ABORT, 'transaction user not found') END; UPDATE users SET balance = balance + CASE NEW.kind WHEN 'top_up' THEN NEW.amount ELSE -NEW.amount END WHERE id = NEW.user_id AND (NEW.kind = 'top_up' OR balance >= NEW.amount); SELECT CASE WHEN changes() <> 1 THEN RAISE(ABORT, 'insufficient balance') END; UPDATE transactions SET processed_at = unixepoch() WHERE id = NEW.id; END",
+  "CREATE TRIGGER IF NOT EXISTS transaction_immutable BEFORE UPDATE ON transactions WHEN OLD.processed_at IS NOT NULL AND (NEW.external_id IS NOT OLD.external_id OR NEW.user_id IS NOT OLD.user_id OR NEW.product_id IS NOT OLD.product_id OR NEW.kind IS NOT OLD.kind OR NEW.status IS NOT OLD.status OR NEW.amount IS NOT OLD.amount OR NEW.product_name IS NOT OLD.product_name OR NEW.fulfillment IS NOT OLD.fulfillment OR NEW.license_key IS NOT OLD.license_key OR NEW.processed_at IS NOT OLD.processed_at OR NEW.created_at IS NOT OLD.created_at) BEGIN SELECT RAISE(ABORT, 'processed transaction is immutable'); END",
+  "CREATE TRIGGER IF NOT EXISTS users_validate BEFORE INSERT ON users WHEN NEW.name = '' OR NEW.email = '' OR NEW.password = '' BEGIN SELECT RAISE(ABORT, 'invalid user'); END",
+  "CREATE TRIGGER IF NOT EXISTS products_validate_insert BEFORE INSERT ON products WHEN NEW.slug = '' OR NEW.name = '' OR NEW.description = '' OR NEW.fulfillment = '' OR NEW.category NOT IN ('license', 'service', 'book', 'asset') OR NEW.price <= 0 BEGIN SELECT RAISE(ABORT, 'invalid product'); END",
+  "CREATE TRIGGER IF NOT EXISTS products_validate_update BEFORE UPDATE ON products WHEN NEW.slug = '' OR NEW.name = '' OR NEW.description = '' OR NEW.fulfillment = '' OR NEW.category NOT IN ('license', 'service', 'book', 'asset') OR NEW.price <= 0 BEGIN SELECT RAISE(ABORT, 'invalid product'); END",
+  "CREATE TRIGGER IF NOT EXISTS transactions_validate_external_id BEFORE INSERT ON transactions WHEN NEW.external_id = '' BEGIN SELECT RAISE(ABORT, 'external id must not be empty'); END",
+  "CREATE TRIGGER IF NOT EXISTS transactions_validate_amount BEFORE INSERT ON transactions WHEN NEW.amount <= 0 BEGIN SELECT RAISE(ABORT, 'amount must be positive'); END",
+  "CREATE TRIGGER IF NOT EXISTS transactions_validate_external_id_update BEFORE UPDATE OF external_id ON transactions WHEN NEW.external_id = '' BEGIN SELECT RAISE(ABORT, 'external id must not be empty'); END",
+  "CREATE TRIGGER IF NOT EXISTS transactions_validate_amount_update BEFORE UPDATE OF amount ON transactions WHEN NEW.amount <= 0 BEGIN SELECT RAISE(ABORT, 'amount must be positive'); END"
+]
+
+[database.setup.postgres]
+statements = [
+  "CREATE TABLE IF NOT EXISTS users (id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, name TEXT NOT NULL CHECK (name <> ''), email TEXT NOT NULL CHECK (email <> ''), password TEXT NOT NULL CHECK (password <> ''), role TEXT NOT NULL DEFAULT 'customer' CHECK (role IN ('admin', 'customer')), balance BIGINT NOT NULL DEFAULT 0 CHECK (balance >= 0), created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM clock_timestamp())::BIGINT))",
+  "CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_unique ON users (lower(email))",
+  "CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY CHECK (token <> ''), user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at BIGINT NOT NULL CHECK (expires_at > 0))",
+  "CREATE TABLE IF NOT EXISTS user_addresses (user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, profile TEXT NOT NULL CHECK (profile IN ('base', 'solana-mainnet')), caip2 TEXT NOT NULL CHECK (caip2 IN ('eip155:8453', 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp')), address_index BIGINT NOT NULL CHECK (address_index >= 0), address TEXT NOT NULL CHECK (address <> ''), derivation_path TEXT NOT NULL CHECK (derivation_path <> ''), PRIMARY KEY (user_id, profile, address_index), UNIQUE (profile, address))",
+  "CREATE TABLE IF NOT EXISTS products (id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, slug TEXT NOT NULL UNIQUE CHECK (slug <> ''), name TEXT NOT NULL CHECK (name <> ''), description TEXT NOT NULL CHECK (description <> ''), category TEXT NOT NULL CHECK (category IN ('license', 'service', 'book', 'asset')), price BIGINT NOT NULL CHECK (price > 0), active BOOLEAN NOT NULL DEFAULT TRUE, fulfillment TEXT NOT NULL CHECK (fulfillment <> ''), created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM clock_timestamp())::BIGINT), updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM clock_timestamp())::BIGINT))",
+  "CREATE TABLE IF NOT EXISTS transactions (id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, external_id TEXT NOT NULL UNIQUE CHECK (external_id <> ''), user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT, product_id BIGINT REFERENCES products(id) ON DELETE RESTRICT, kind TEXT NOT NULL CHECK (kind IN ('top_up', 'purchase')), status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed')), amount BIGINT NOT NULL CHECK (amount > 0), product_name TEXT, fulfillment TEXT, license_key TEXT UNIQUE, processed_at BIGINT, created_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM clock_timestamp())::BIGINT), CHECK ((kind = 'top_up' AND product_id IS NULL AND product_name IS NULL AND fulfillment IS NULL AND license_key IS NULL) OR (kind = 'purchase' AND product_id IS NOT NULL AND product_name IS NOT NULL AND fulfillment IS NOT NULL AND license_key IS NOT NULL)))",
+  "CREATE TABLE IF NOT EXISTS exact_payment_methods (id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, scope TEXT NOT NULL CHECK (scope = 'GLOBAL'), network TEXT NOT NULL CHECK (network <> ''), asset TEXT NOT NULL CHECK (asset <> ''), pay_to TEXT NOT NULL CHECK (pay_to <> ''), timeout_seconds BIGINT NOT NULL CHECK (timeout_seconds > 0), token_name TEXT NOT NULL CHECK (token_name <> ''), token_version BIGINT NOT NULL CHECK (token_version > 0), active BOOLEAN NOT NULL DEFAULT TRUE, UNIQUE (scope, network, asset, pay_to))",
+  "CREATE INDEX IF NOT EXISTS sessions_user_id_index ON sessions (user_id)",
+  "CREATE INDEX IF NOT EXISTS transactions_user_id_index ON transactions (user_id, id DESC)",
+  "CREATE INDEX IF NOT EXISTS transactions_product_id_index ON transactions (product_id)",
+  "CREATE OR REPLACE FUNCTION process_store_transaction() RETURNS TRIGGER AS $$ BEGIN IF TG_OP = 'UPDATE' AND OLD.processed_at IS NOT NULL THEN IF NEW IS DISTINCT FROM OLD THEN RAISE EXCEPTION 'processed transaction is immutable'; END IF; RETURN NEW; END IF; IF NEW.status = 'confirmed' AND NEW.processed_at IS NULL THEN IF NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.user_id) THEN RAISE EXCEPTION 'transaction user not found'; END IF; UPDATE users SET balance = balance + CASE NEW.kind WHEN 'top_up' THEN NEW.amount ELSE -NEW.amount END WHERE id = NEW.user_id AND (NEW.kind = 'top_up' OR balance >= NEW.amount); IF NOT FOUND THEN RAISE EXCEPTION 'insufficient balance'; END IF; NEW.processed_at = EXTRACT(EPOCH FROM clock_timestamp())::BIGINT; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql",
+  "DROP TRIGGER IF EXISTS transaction_process_trigger ON transactions",
+  "CREATE TRIGGER transaction_process_trigger BEFORE INSERT OR UPDATE ON transactions FOR EACH ROW EXECUTE FUNCTION process_store_transaction()",
+  "DROP TRIGGER IF EXISTS users_validate_trigger ON users",
+  "DROP TRIGGER IF EXISTS products_validate_trigger ON products",
+  "DROP TRIGGER IF EXISTS transactions_validate_trigger ON transactions",
+  "DROP FUNCTION IF EXISTS validate_store_input()",
+  "CREATE OR REPLACE FUNCTION validate_store_user() RETURNS TRIGGER AS $$ BEGIN IF NEW.name = '' OR NEW.email = '' OR NEW.password = '' THEN RAISE EXCEPTION 'invalid user'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql",
+  "CREATE OR REPLACE FUNCTION validate_store_product() RETURNS TRIGGER AS $$ BEGIN IF NEW.slug = '' OR NEW.name = '' OR NEW.description = '' OR NEW.fulfillment = '' OR NEW.category NOT IN ('license', 'service', 'book', 'asset') OR NEW.price <= 0 THEN RAISE EXCEPTION 'invalid product'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql",
+  "CREATE OR REPLACE FUNCTION validate_store_transaction() RETURNS TRIGGER AS $$ BEGIN IF NEW.external_id = '' THEN RAISE EXCEPTION 'external id must not be empty'; ELSIF NEW.amount <= 0 THEN RAISE EXCEPTION 'amount must be positive'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql",
+  "CREATE TRIGGER users_validate_trigger BEFORE INSERT OR UPDATE ON users FOR EACH ROW EXECUTE FUNCTION validate_store_user()",
+  "CREATE TRIGGER products_validate_trigger BEFORE INSERT OR UPDATE ON products FOR EACH ROW EXECUTE FUNCTION validate_store_product()",
+  "CREATE TRIGGER transactions_validate_trigger BEFORE INSERT OR UPDATE ON transactions FOR EACH ROW EXECUTE FUNCTION validate_store_transaction()"
+]
+
+[database.setup.common]
+statements = [
+  "INSERT INTO users (name, email, password, role) VALUES ('Demo Administrator', 'admin', '$argon2id$v=19$m=19456,t=2,p=1$Ed856bd8JquN3O8a8YbBkQ$9KebavABf/1aW97pVn+LTRTeY4KFIhffpLrJxDa5xcw', 'admin') ON CONFLICT DO NOTHING",
+  "INSERT INTO exact_payment_methods (scope, network, asset, pay_to, timeout_seconds, token_name, token_version) VALUES ('GLOBAL', 'eip155:8453', '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', '0x9858EfFD232B4033E47d90003D41EC34EcaEda94', 60, 'USDC', 2) ON CONFLICT DO NOTHING",
+  "INSERT INTO products (slug, name, description, category, price, fulfillment) VALUES ('macos-pro-access-code', 'macOS Pro Access Code', 'Single-user access code for the macOS Pro edition.', 'license', 4999, 'Your access code is displayed in this purchase record. Redeem it in the macOS Pro application under Account > Redeem Code.') ON CONFLICT DO NOTHING",
+  "INSERT INTO products (slug, name, description, category, price, fulfillment) VALUES ('background-removal', 'Studio Background Removal', 'One high-resolution image processed with careful edge handling.', 'service', 1299, 'Upload your source image through the store support channel and include this purchase ID. Delivery is provided as a transparent PNG.') ON CONFLICT DO NOTHING",
+  "INSERT INTO products (slug, name, description, category, price, fulfillment) VALUES ('practical-product-design', 'Practical Product Design', 'A digital book on planning, shipping, and maintaining small software products.', 'book', 1899, 'Your purchase record includes your personal reading access code and download instructions.') ON CONFLICT DO NOTHING",
+  "INSERT INTO products (slug, name, description, category, price, fulfillment) VALUES ('architectural-planter-3d', 'Architectural Planter 3D Model', 'Production-ready low-poly planter asset with organized materials.', 'asset', 2499, 'Your purchase record includes the asset retrieval instructions and license key.') ON CONFLICT DO NOTHING"
+]
+
+[auth.basic]
+sql = "SELECT id, password FROM users WHERE lower(email) = lower($1)"
+owner = "id"
+password = "password"
+[auth.bearer]
+sql = { sqlite = "SELECT s.user_id, u.role FROM sessions AS s JOIN users AS u ON u.id = s.user_id WHERE s.token = $1 AND s.expires_at > unixepoch()", postgres = "SELECT s.user_id, u.role FROM sessions AS s JOIN users AS u ON u.id = s.user_id WHERE s.token = $1 AND s.expires_at > EXTRACT(EPOCH FROM clock_timestamp())::BIGINT" }
+owner = "user_id"
+role = "role"
+
+[altcha]
+secret = "${ALTCHA_SECRET}"
+key_secret = "${ALTCHA_KEY_SECRET}"
+path = "/challenge"
+algorithm = "PBKDF2/SHA-256"
+cost = 10000
+max_number = 10000
+expires_seconds = 300
+bind_ip = true
+[wallets]
+mnemonic = "${WALLET_MNEMONIC}"
+[[wallets.profiles]]
+name = "base"
+caip2 = "eip155:8453"
+curve = "secp256k1"
+derivation = "bip32"
+path = "m/44'/60'/{user_id}'/0/{address_index}"
+address_format = "evm"
+max_addresses = 1
+[[wallets.profiles]]
+name = "solana-mainnet"
+caip2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+curve = "ed25519"
+derivation = "slip10"
+path = "m/44'/501'/{user_id}'/{address_index}'"
+address_format = "base58-public-key"
+max_addresses = 1
+
+[[endpoints]]
+method = "POST"
+path = "/users"
+action = "register"
+altcha = true
+limits = { body_bytes = 4096, requests = 3, window_seconds = 300 }
+[[endpoints]]
+method = "POST"
+path = "/tokens"
+action = "login"
+auth = ["basic"]
+altcha = true
+limits = { body_bytes = 1024, requests = 5, window_seconds = 60 }
+[[endpoints]]
+method = "GET"
+path = "/me"
+action = "me"
+auth = ["bearer"]
+[[endpoints]]
+method = "GET"
+path = "/products"
+action = "list_products"
+[[endpoints]]
+method = "GET"
+path = "/payment-methods"
+action = "list_payment_methods"
+[[endpoints]]
+method = "GET"
+path = "/transactions"
+action = "list_transactions"
+auth = ["bearer"]
+[[endpoints]]
+method = "POST"
+path = "/top-ups"
+action = "create_top_up"
+auth = ["bearer"]
+limits = { body_bytes = 2048, requests = 10, window_seconds = 60 }
+[[endpoints]]
+method = "POST"
+path = "/purchases"
+action = "create_purchase"
+auth = ["bearer"]
+limits = { body_bytes = 2048, requests = 10, window_seconds = 60 }
+[[endpoints]]
+method = "GET"
+path = "/admin/summary"
+action = "admin_summary"
+auth = ["bearer"]
+roles = ["admin"]
+[[endpoints]]
+method = "GET"
+path = "/admin/users"
+action = "admin_users"
+auth = ["bearer"]
+roles = ["admin"]
+[[endpoints]]
+method = "GET"
+path = "/admin/transactions"
+action = "admin_transactions"
+auth = ["bearer"]
+roles = ["admin"]
+[[endpoints]]
+method = "GET"
+path = "/admin/users/{id}/transactions"
+action = "admin_user_transactions"
+auth = ["bearer"]
+roles = ["admin"]
+[[endpoints]]
+method = "GET"
+path = "/admin/products"
+action = "admin_products"
+auth = ["bearer"]
+roles = ["admin"]
+[[endpoints]]
+method = "POST"
+path = "/admin/products"
+action = "admin_create_product"
+auth = ["bearer"]
+roles = ["admin"]
+[[endpoints]]
+method = "PUT"
+path = "/admin/products/{id}"
+action = "admin_update_product"
+auth = ["bearer"]
+roles = ["admin"]
+[[endpoints]]
+method = "PUT"
+path = "/admin/products/{id}/status"
+action = "admin_update_product_status"
+auth = ["bearer"]
+roles = ["admin"]
+
+[actions.register]
+sql = "INSERT INTO users (name, email, password) VALUES ($1, lower($2), $3) RETURNING id, name, email, role, balance, created_at"
+params = ["name", "email", "password"]
+hash = ["password"]
+result = "one"
+status = 201
+no_store = true
+[actions.register.wallets]
+profiles = ["base", "solana-mainnet"]
+sql = "INSERT INTO user_addresses (user_id, profile, caip2, address_index, address, derivation_path) VALUES ($1, $2, $3, 0, $4, $5)"
+params = ["$result.id", "$profile.name", "$profile.caip2", "$wallet.address", "$wallet.derivation_path"]
+[actions.register.wallets.values]
+user_id = "$result.id"
+address_index = "0"
+[[actions.register.errors]]
+database_message = "invalid user"
+status = 422
+message = "name, email, and password must not be empty"
+
+[actions.login]
+sql = { sqlite = "INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, unixepoch() + 86400) RETURNING token, expires_at", postgres = "INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, EXTRACT(EPOCH FROM clock_timestamp())::BIGINT + 86400) RETURNING token, expires_at" }
+params = ["$token", "$owner"]
+result = "one"
+status = 201
+no_store = true
+[actions.me]
+sql = "SELECT id, name, email, role, balance, created_at FROM users WHERE id = $1"
+params = ["$owner"]
+result = "one"
+no_store = true
+[actions.list_products]
+sql = { sqlite = "SELECT id, slug, name, description, category, price, active, created_at, updated_at FROM products WHERE active = 1 ORDER BY id", postgres = "SELECT id, slug, name, description, category, price, active, created_at, updated_at FROM products WHERE active = TRUE ORDER BY id" }
+result = "many"
+boolean_columns = ["active"]
+[actions.list_payment_methods]
+sql = { sqlite = "SELECT 'exact' AS scheme, network, asset, token_name, token_version, timeout_seconds FROM exact_payment_methods WHERE active = 1 ORDER BY network, asset, token_name, token_version, id", postgres = "SELECT 'exact' AS scheme, network, asset, token_name, token_version, timeout_seconds FROM exact_payment_methods WHERE active = TRUE ORDER BY network, asset, token_name, token_version, id" }
+result = "many"
+[actions.list_transactions]
+sql = "SELECT id, external_id, product_id, kind, status, amount, product_name, fulfillment, license_key, processed_at, created_at FROM transactions WHERE user_id = $1 ORDER BY id DESC"
+params = ["$owner"]
+result = "many"
+no_store = true
+[actions.create_top_up]
+sql = { sqlite = "INSERT INTO transactions (external_id, user_id, kind, status, amount, processed_at) VALUES ($1, $2, 'top_up', 'confirmed', $3, unixepoch()) RETURNING id, external_id, kind, status, amount, processed_at, created_at", postgres = "INSERT INTO transactions (external_id, user_id, kind, status, amount) VALUES ($1, $2, 'top_up', 'confirmed', $3::BIGINT) RETURNING id, external_id, kind, status, amount, processed_at, created_at" }
+params = ["external_id", "$owner", "amount"]
+result = "one"
+status = 201
+no_store = true
+[[actions.create_top_up.errors]]
+database_message = "amount must be positive"
+status = 422
+message = "amount must be positive"
+[[actions.create_top_up.errors]]
+database_message = "external id must not be empty"
+status = 422
+message = "external_id must not be empty"
+
+[actions.create_purchase]
+sql = { sqlite = "INSERT INTO transactions (external_id, user_id, product_id, kind, status, amount, product_name, fulfillment, license_key, processed_at) SELECT $1, $2, p.id, 'purchase', 'confirmed', p.price, p.name, p.fulfillment, $3, unixepoch() FROM products AS p WHERE p.id = $4 AND p.active = 1 RETURNING id, external_id, product_id, kind, status, amount, product_name, fulfillment, license_key, processed_at, created_at", postgres = "INSERT INTO transactions (external_id, user_id, product_id, kind, status, amount, product_name, fulfillment, license_key) SELECT $1, $2, p.id, 'purchase', 'confirmed', p.price, p.name, p.fulfillment, $3 FROM products AS p WHERE p.id = $4 AND p.active = TRUE RETURNING id, external_id, product_id, kind, status, amount, product_name, fulfillment, license_key, processed_at, created_at" }
+params = ["external_id", "$owner", "$token", "product_id"]
+result = "one"
+status = 201
+no_store = true
+[[actions.create_purchase.errors]]
+database_message = "insufficient balance"
+status = 402
+message = "insufficient balance"
+[actions.create_purchase.errors.x402]
+sql = { sqlite = "WITH product AS (SELECT price FROM products WHERE id = $1 AND active = 1), accepts AS (SELECT COALESCE(json_group_array(json_object('scheme', 'exact', 'network', m.network, 'amount', CAST(p.price * 10000 AS TEXT), 'asset', m.asset, 'payTo', m.pay_to, 'maxTimeoutSeconds', m.timeout_seconds, 'extra', json_object('name', m.token_name, 'version', CAST(m.token_version AS TEXT)))), '[]') AS value FROM exact_payment_methods AS m CROSS JOIN product AS p WHERE m.scope = 'GLOBAL' AND m.active = 1), destinations AS (SELECT COALESCE(json_group_array(json_object('network', a.caip2, 'asset', CASE WHEN a.caip2 = 'eip155:8453' THEN '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' WHEN a.caip2 = 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp' THEN 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' END, 'payTo', a.address, 'minAmount', CAST(p.price * 10000 AS TEXT))), '[]') AS value FROM user_addresses AS a CROSS JOIN product AS p WHERE a.user_id = $2) SELECT json_object('x402Version', 2, 'error', 'insufficient balance', 'resource', json_object('url', 'http://127.0.0.1:3000/v1/purchases', 'description', 'Purchase the requested digital-store product with USDC.', 'mimeType', 'application/json'), 'accepts', json(accepts.value), 'extensions', json_object('deposit', json_object('info', json_object('uid', CAST($3 AS TEXT), 'destinations', json(destinations.value)), 'schema', json_object('$schema', 'https://json-schema.org/draft/2020-12/schema', 'type', 'object', 'required', json_array('uid', 'destinations'), 'additionalProperties', json('false'), 'properties', json_object('uid', json_object('type', 'string'), 'destinations', json_object('type', 'array', 'items', json_object('type', 'object', 'required', json_array('network', 'asset', 'payTo', 'minAmount'), 'additionalProperties', json('false'), 'properties', json_object('network', json_object('type', 'string'), 'asset', json_object('type', 'string'), 'payTo', json_object('type', 'string'), 'minAmount', json_object('type', 'string'))))))))) AS payment_required FROM accepts CROSS JOIN destinations", postgres = "WITH product AS (SELECT price FROM products WHERE id = $1 AND active = TRUE), accepts AS (SELECT COALESCE(jsonb_agg(jsonb_build_object('scheme', 'exact', 'network', m.network, 'amount', (p.price * 10000)::TEXT, 'asset', m.asset, 'payTo', m.pay_to, 'maxTimeoutSeconds', m.timeout_seconds, 'extra', jsonb_build_object('name', m.token_name, 'version', m.token_version::TEXT))), '[]'::jsonb) AS value FROM exact_payment_methods AS m CROSS JOIN product AS p WHERE m.scope = 'GLOBAL' AND m.active = TRUE), destinations AS (SELECT COALESCE(jsonb_agg(jsonb_build_object('network', a.caip2, 'asset', CASE WHEN a.caip2 = 'eip155:8453' THEN '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' WHEN a.caip2 = 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp' THEN 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' END, 'payTo', a.address, 'minAmount', (p.price * 10000)::TEXT)), '[]'::jsonb) AS value FROM user_addresses AS a CROSS JOIN product AS p WHERE a.user_id = $2) SELECT jsonb_build_object('x402Version', 2, 'error', 'insufficient balance', 'resource', jsonb_build_object('url', 'http://127.0.0.1:3000/v1/purchases', 'description', 'Purchase the requested digital-store product with USDC.', 'mimeType', 'application/json'), 'accepts', accepts.value, 'extensions', jsonb_build_object('deposit', jsonb_build_object('info', jsonb_build_object('uid', $3::TEXT, 'destinations', destinations.value), 'schema', jsonb_build_object('$schema', 'https://json-schema.org/draft/2020-12/schema', 'type', 'object', 'required', jsonb_build_array('uid', 'destinations'), 'additionalProperties', FALSE, 'properties', jsonb_build_object('uid', jsonb_build_object('type', 'string'), 'destinations', jsonb_build_object('type', 'array', 'items', jsonb_build_object('type', 'object', 'required', jsonb_build_array('network', 'asset', 'payTo', 'minAmount'), 'additionalProperties', FALSE, 'properties', jsonb_build_object('network', jsonb_build_object('type', 'string'), 'asset', jsonb_build_object('type', 'string'), 'payTo', jsonb_build_object('type', 'string'), 'minAmount', jsonb_build_object('type', 'string')))))))))::TEXT AS payment_required FROM accepts CROSS JOIN destinations" }
+params = ["product_id", "$owner", "$owner"]
+column = "payment_required"
+[[actions.create_purchase.errors]]
+database_message = "external id must not be empty"
+status = 422
+message = "external_id must not be empty"
+
+[actions.admin_summary]
+sql = { sqlite = "SELECT (SELECT COUNT(*) FROM users) AS user_count, (SELECT COUNT(*) FROM users WHERE role = 'customer') AS customer_count, (SELECT COUNT(*) FROM products) AS product_count, (SELECT COUNT(*) FROM transactions) AS transaction_count, (SELECT COALESCE(SUM(balance), 0) FROM users) AS total_balances, (SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE kind = 'top_up' AND status = 'confirmed') AS total_topups, (SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE kind = 'purchase' AND status = 'confirmed') AS total_sales", postgres = "SELECT (SELECT COUNT(*) FROM users) AS user_count, (SELECT COUNT(*) FROM users WHERE role = 'customer') AS customer_count, (SELECT COUNT(*) FROM products) AS product_count, (SELECT COUNT(*) FROM transactions) AS transaction_count, (SELECT COALESCE(SUM(balance), 0)::BIGINT FROM users) AS total_balances, (SELECT COALESCE(SUM(amount), 0)::BIGINT FROM transactions WHERE kind = 'top_up' AND status = 'confirmed') AS total_topups, (SELECT COALESCE(SUM(amount), 0)::BIGINT FROM transactions WHERE kind = 'purchase' AND status = 'confirmed') AS total_sales" }
+result = "one"
+no_store = true
+[actions.admin_users]
+sql = "SELECT id, name, email, role, balance, created_at FROM users ORDER BY id"
+result = "many"
+no_store = true
+[actions.admin_transactions]
+sql = "SELECT t.id, t.external_id, t.user_id, u.name AS user_name, u.email AS user_email, t.product_id, t.kind, t.status, t.amount, t.product_name, t.fulfillment, t.license_key, t.processed_at, t.created_at FROM transactions AS t JOIN users AS u ON u.id = t.user_id ORDER BY t.id DESC"
+result = "many"
+no_store = true
+[actions.admin_user_transactions]
+sql = { sqlite = "SELECT t.id, t.external_id, t.user_id, u.name AS user_name, u.email AS user_email, t.product_id, t.kind, t.status, t.amount, t.product_name, t.fulfillment, t.license_key, t.processed_at, t.created_at FROM transactions AS t JOIN users AS u ON u.id = t.user_id WHERE t.user_id = $1 ORDER BY t.id DESC", postgres = "SELECT t.id, t.external_id, t.user_id, u.name AS user_name, u.email AS user_email, t.product_id, t.kind, t.status, t.amount, t.product_name, t.fulfillment, t.license_key, t.processed_at, t.created_at FROM transactions AS t JOIN users AS u ON u.id = t.user_id WHERE t.user_id = $1::BIGINT ORDER BY t.id DESC" }
+params = ["id"]
+result = "many"
+no_store = true
+[actions.admin_products]
+sql = "SELECT id, slug, name, description, category, price, active, fulfillment, created_at, updated_at FROM products ORDER BY id"
+result = "many"
+no_store = true
+boolean_columns = ["active"]
+[actions.admin_create_product]
+sql = { sqlite = "INSERT INTO products (slug, name, description, category, price, fulfillment) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, slug, name, description, category, price, active, fulfillment, created_at, updated_at", postgres = "INSERT INTO products (slug, name, description, category, price, fulfillment) VALUES ($1, $2, $3, $4, $5::BIGINT, $6) RETURNING id, slug, name, description, category, price, active, fulfillment, created_at, updated_at" }
+params = ["slug", "name", "description", "category", "price", "fulfillment"]
+result = "one"
+status = 201
+no_store = true
+boolean_columns = ["active"]
+[actions.admin_update_product]
+sql = { sqlite = "UPDATE products SET slug = $1, name = $2, description = $3, category = $4, price = $5, fulfillment = $6, updated_at = unixepoch() WHERE id = $7 RETURNING id, slug, name, description, category, price, active, fulfillment, created_at, updated_at", postgres = "UPDATE products SET slug = $1, name = $2, description = $3, category = $4, price = $5::BIGINT, fulfillment = $6, updated_at = EXTRACT(EPOCH FROM clock_timestamp())::BIGINT WHERE id = $7::BIGINT RETURNING id, slug, name, description, category, price, active, fulfillment, created_at, updated_at" }
+params = ["slug", "name", "description", "category", "price", "fulfillment", "id"]
+result = "optional"
+no_store = true
+boolean_columns = ["active"]
+[actions.admin_update_product_status]
+sql = { sqlite = "UPDATE products SET active = CASE WHEN $1 THEN 1 ELSE 0 END, updated_at = unixepoch() WHERE id = $2 RETURNING id, slug, name, description, category, price, active, fulfillment, created_at, updated_at", postgres = "UPDATE products SET active = $1::BOOLEAN, updated_at = EXTRACT(EPOCH FROM clock_timestamp())::BIGINT WHERE id = $2::BIGINT RETURNING id, slug, name, description, category, price, active, fulfillment, created_at, updated_at" }
+params = ["active", "id"]
+result = "optional"
+no_store = true
+boolean_columns = ["active"]
+[[actions.admin_create_product.errors]]
+database_message = "invalid product"
+status = 422
+message = "invalid product"
+[[actions.admin_update_product.errors]]
+database_message = "invalid product"
+status = 422
+message = "invalid product"
+[[actions.admin_update_product_status.errors]]
+database_message = "invalid product"
+status = 422
+message = "invalid product"

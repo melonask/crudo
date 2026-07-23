@@ -20,7 +20,7 @@ export default defineConfig({
       '/guide/': [{ text: 'Guide', items: [{ text: 'Getting started', link: '/guide/getting-started' }, { text: 'Core concepts', link: '/guide/core-concepts' }, { text: 'Configuration', link: '/guide/configuration' }, { text: 'Security', link: '/guide/security' }] }],
       '/reference/': [{ text: 'Reference', items: [{ text: 'Configuration schema', link: '/reference/configuration' }, { text: 'HTTP API', link: '/reference/http-api' }, { text: 'Actions', link: '/reference/actions' }, { text: 'Store API', link: '/reference/demo-api' }, { text: 'Wallets', link: '/reference/wallets' }, { text: 'Rust API', link: '/reference/rust-api' }] }],
       '/operations/': [{ text: 'Operations', items: [{ text: 'Docker', link: '/operations/docker' }, { text: 'Deployment', link: '/operations/deployment' }] }],
-      '/examples/': [{ text: 'Examples', items: [{ text: 'curl lifecycle', link: '/examples/curl' }, { text: 'Custom CRUD API', link: '/examples/custom-crud' }, { text: 'Authentication', link: '/examples/authentication' }, { text: 'Limits and errors', link: '/examples/limits-errors' }, { text: 'SQLite', link: '/examples/sqlite' }, { text: 'PostgreSQL', link: '/examples/postgresql' }] }],
+      '/examples/': [{ text: 'Examples', items: [{ text: 'curl lifecycle', link: '/examples/curl' }, { text: 'Custom CRUD API', link: '/examples/custom-crud' }, { text: 'Authentication', link: '/examples/authentication' }, { text: 'Limits and errors', link: '/examples/limits-errors' }, { text: 'Store', link: '/examples/store' }] }],
       '/': [{ text: 'More', items: [{ text: 'Limitations & troubleshooting', link: '/limitations' }] }]
     },
     search: { provider: 'local' },

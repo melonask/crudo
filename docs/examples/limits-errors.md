@@ -12,7 +12,9 @@ window_seconds = 60
 
 [database]
 url = "sqlite://limits.db?mode=rwc"
-setup = [
+
+[database.setup.sqlite]
+statements = [
   "CREATE TABLE IF NOT EXISTS transfers (id INTEGER PRIMARY KEY AUTOINCREMENT, amount INTEGER NOT NULL)",
   "CREATE TRIGGER IF NOT EXISTS transfers_positive BEFORE INSERT ON transfers WHEN NEW.amount <= 0 BEGIN SELECT RAISE(ABORT, 'amount must be positive'); END"
 ]
@@ -28,7 +30,7 @@ window_seconds = 60
 body_bytes = 1024
 
 [actions.create_transfer]
-sql = "INSERT INTO transfers (amount) VALUES (?) RETURNING id, amount"
+sql = "INSERT INTO transfers (amount) VALUES ($1) RETURNING id, amount"
 params = ["amount"]
 result = "one"
 status = 201

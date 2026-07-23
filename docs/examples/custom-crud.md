@@ -15,7 +15,9 @@ window_seconds = 60
 
 [database]
 url = "sqlite://tasks.db?mode=rwc"
-setup = [
+
+[database.setup.sqlite]
+statements = [
   "CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()))"
 ]
 
@@ -45,7 +47,7 @@ path = "/tasks/{id}"
 action = "delete_task"
 
 [actions.create_task]
-sql = "INSERT INTO tasks (title) VALUES (?) RETURNING id, title, done, created_at, updated_at"
+sql = "INSERT INTO tasks (title) VALUES ($1) RETURNING id, title, done, created_at, updated_at"
 params = ["title"]
 result = "one"
 status = 201
@@ -55,17 +57,17 @@ sql = "SELECT id, title, done, created_at, updated_at FROM tasks ORDER BY id"
 result = "many"
 
 [actions.get_task]
-sql = "SELECT id, title, done, created_at, updated_at FROM tasks WHERE id = ?"
+sql = "SELECT id, title, done, created_at, updated_at FROM tasks WHERE id = $1"
 params = ["id"]
 result = "one"
 
 [actions.update_task]
-sql = "UPDATE tasks SET title = ?, done = ?, updated_at = unixepoch() WHERE id = ? RETURNING id, title, done, created_at, updated_at"
+sql = "UPDATE tasks SET title = $1, done = $2, updated_at = unixepoch() WHERE id = $3 RETURNING id, title, done, created_at, updated_at"
 params = ["title", "done", "id"]
 result = "one"
 
 [actions.delete_task]
-sql = "DELETE FROM tasks WHERE id = ? RETURNING id"
+sql = "DELETE FROM tasks WHERE id = $1 RETURNING id"
 params = ["id"]
 result = "one"
 ```

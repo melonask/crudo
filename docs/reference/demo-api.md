@@ -1,6 +1,6 @@
 # Shipped store API
 
-`config/sqlite.toml` and `config/postgres.toml` are digital-store bootstraps. Both require `WALLET_MNEMONIC`, `ALTCHA_SECRET`, and `ALTCHA_KEY_SECRET`; PostgreSQL also requires `DATABASE_URL`. Both explicitly set `prefix = "v1"`; every route here is served under `/v1`. They seed four active products and demo-only `admin` / `admin` idempotently without overwriting edits. Change or remove that account before deployment.
+`config/store.toml` is the universal digital-store bootstrap. It requires `DATABASE_URL`, `WALLET_MNEMONIC`, `ALTCHA_SECRET`, and `ALTCHA_KEY_SECRET`; `DATABASE_URL` selects SQLite or PostgreSQL. It explicitly sets `prefix = "v1"`; every route here is served under `/v1`. It seeds four active products and demo-only `admin` / `admin` idempotently without overwriting edits. Change or remove that account before deployment.
 
 ::: warning Development only
 Each registration derives and persists Base and Solana user wallets. Self-service top-ups create demo credit without payment-provider verification. Insufficient purchases return a configured x402 `402` requirement; Crudo does not verify or settle its payments. Product and transaction setup is a demo bootstrap, not migration tooling or real payment processing. Do not expose it as-is.
@@ -64,10 +64,10 @@ Administrator routes require a Bearer token belonging to a user with `role = "ad
 {"active":false}
 ```
 
-The SQLite configuration enforces its administrator predicate in SQL: a non-admin receives safe empty arrays or `null` for optional mutation results. PostgreSQL raises and maps the same condition to `403`. Clients must treat either behavior as denied access and must not infer authorization from an empty result.
+The administrator endpoints declare `roles = ["admin"]`. Their mandatory Bearer authentication selects the `role` column; an authenticated non-admin receives `403` before its action runs.
 
 ## Store frontend
 
 The frontend lives at [demo-crudo.github.io](https://demo-crudo.github.io/) and its source is [demo-crudo/demo-crudo.github.io](https://github.com/demo-crudo/demo-crudo.github.io), not this repository. Its visible **API URL** field accepts any compatible API base and defaults exactly to `http://127.0.0.1:3000/v1`. It is keyboard-accessible and provides a minimal customer dashboard (balance, demo credit, purchases, own history) or administrator dashboard (summary, users, transactions, products).
 
-The store configurations permit the hosted UI at `https://demo-crudo.github.io` plus local development at `http://127.0.0.1:8000` and `http://localhost:8000`. Custom deployments must configure their own exact origins; use existing `${ENV}` expansion in TOML when appropriate rather than changing Rust. Independently of CORS, an HTTPS page targeting plain HTTP localhost may be blocked by browser local-network or mixed-content policy. Crudo does not serve or hardcode the frontend.
+The store configuration permits the hosted UI at `https://demo-crudo.github.io` plus local development at `http://127.0.0.1:8000` and `http://localhost:8000`. Custom deployments must configure their own exact origins; use existing `${ENV}` expansion in TOML when appropriate rather than changing Rust. Independently of CORS, an HTTPS page targeting plain HTTP localhost may be blocked by browser local-network or mixed-content policy. Crudo does not serve or hardcode the frontend.

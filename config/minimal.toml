@@ -1,10 +1,8 @@
-# Local loopback starter with no required secrets or environment variables.
 [server]
 address = "127.0.0.1:3000"
 prefix = "v1"
 
 [server.limits]
-# Conservative body, time, concurrency, and per-IP rate limits for local use.
 body_bytes = 65536
 timeout_seconds = 15
 concurrency = 32
@@ -13,37 +11,30 @@ window_seconds = 60
 
 [database]
 url = "sqlite://crudo.db?mode=rwc"
-# Idempotent setup creates the resource table before requests are served.
-setup = [
-  "CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()))"
-]
 
-# Versioned health and item CRUD routes map to the actions below.
+[database.setup.sqlite]
+statements = ["CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL CHECK (name <> ''), created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()))"]
+
 [[endpoints]]
 method = "GET"
 path = "/health"
 action = "health"
-
 [[endpoints]]
 method = "POST"
 path = "/items"
 action = "create_item"
-
 [[endpoints]]
 method = "GET"
 path = "/items"
 action = "list_items"
-
 [[endpoints]]
 method = "GET"
 path = "/items/{id}"
 action = "get_item"
-
 [[endpoints]]
 method = "PUT"
 path = "/items/{id}"
 action = "update_item"
-
 [[endpoints]]
 method = "DELETE"
 path = "/items/{id}"
@@ -52,28 +43,23 @@ action = "delete_item"
 [actions.health]
 sql = "SELECT 'ok' AS status"
 result = "one"
-
 [actions.create_item]
-sql = "INSERT INTO items (name) VALUES (?) RETURNING id, name, created_at, updated_at"
+sql = "INSERT INTO items (name) VALUES ($1) RETURNING id, name, created_at, updated_at"
 params = ["name"]
 result = "one"
 status = 201
-
 [actions.list_items]
 sql = "SELECT id, name, created_at, updated_at FROM items ORDER BY id"
 result = "many"
-
 [actions.get_item]
-sql = "SELECT id, name, created_at, updated_at FROM items WHERE id = ?"
+sql = "SELECT id, name, created_at, updated_at FROM items WHERE id = $1"
 params = ["id"]
 result = "one"
-
 [actions.update_item]
-sql = "UPDATE items SET name = ?, updated_at = unixepoch() WHERE id = ? RETURNING id, name, created_at, updated_at"
+sql = "UPDATE items SET name = $1, updated_at = unixepoch() WHERE id = $2 RETURNING id, name, created_at, updated_at"
 params = ["name", "id"]
 result = "one"
-
 [actions.delete_item]
-sql = "DELETE FROM items WHERE id = ? RETURNING id"
+sql = "DELETE FROM items WHERE id = $1 RETURNING id"
 params = ["id"]
 result = "optional"

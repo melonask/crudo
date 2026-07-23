@@ -22,7 +22,7 @@
 
 **Cause:** Omitting `[database]` only defaults to `sqlite://crudo.db?mode=rwc` and an empty setup list. It does not create tables required by custom SQL.
 
-**Fix:** Add idempotent `database.setup` statements for a small service, or apply managed migrations before startup in production.
+**Fix:** Add idempotent `database.setup.sqlite`, `database.setup.postgres`, or `database.setup.common` statements for a small service, or apply managed migrations before startup in production.
 
 ### Cargo mentions `generic-array`, `matchit`, or an “available” dependency
 
@@ -37,8 +37,7 @@
 Environment requirements by configuration:
 
 - A configuration without environment expansions: none
-- `config/sqlite.toml`: none
-- `config/postgres.toml`: `DATABASE_URL`
+- `config/store.toml`: `DATABASE_URL`, `WALLET_MNEMONIC`, `ALTCHA_SECRET`, and `ALTCHA_KEY_SECRET`
 - Wallet or ALTCHA variables: only when the selected configuration references those optional features
 
 `WALLET_MNEMONIC` is not globally required by crudo.
@@ -53,7 +52,7 @@ Environment requirements by configuration:
 
 **Cause:** Path and query parameters are strings, but the SQL comparison expects a numeric type.
 
-**Fix:** Cast the value in SQL, for example `$1::BIGINT`. Use numbered PostgreSQL parameters rather than SQLite `?` placeholders.
+**Fix:** Cast the value in SQL, for example `$1::BIGINT`. Universal bound SQL uses numbered `$1`, `$2`, and higher parameters for both engines; use backend variants when syntax differs.
 
 ### `429` or ALTCHA failures behind a proxy
 

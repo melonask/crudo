@@ -16,7 +16,7 @@ features:
   - title: Config-driven routes
     details: Map an HTTP method and path to a named SQL action; every route is explicit.
   - title: Native SQL binding
-    details: Bind request values in declared order with SQLite ? or PostgreSQL $1-style placeholders.
+    details: Bind request values in declared order with universal `$1`, `$2`, and higher placeholders.
   - title: Predictable JSON
     details: Select execute, one, optional, or many for a stable response shape per action.
   - title: Security and load controls
@@ -60,7 +60,9 @@ An endpoint names an action; the action binds `params` in order and determines t
 ```toml
 [database]
 url = "sqlite://notes.db?mode=rwc"
-setup = ["CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL)"]
+
+[database.setup.sqlite]
+statements = ["CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL)"]
 
 [[endpoints]]
 method = "POST"
@@ -68,7 +70,7 @@ path = "/notes"
 action = "create_note"
 
 [actions.create_note]
-sql = "INSERT INTO notes (body) VALUES (?) RETURNING id, body"
+sql = "INSERT INTO notes (body) VALUES ($1) RETURNING id, body"
 params = ["body"]
 result = "one"
 status = 201
@@ -108,14 +110,13 @@ Invalid routes, action references, protection settings, and static configuration
 ::: info Wallet requirements are conditional
 Wallets are optional: `WALLET_MNEMONIC` is not required by crudo or by configurations that omit `[wallets]` and wallet action stages.
 
-ALTCHA is independent of the shipped store configurations. Both store configurations use wallet stages and require `WALLET_MNEMONIC`; a wallet passphrase defaults to an empty string when wallets are configured.
+ALTCHA is independent of the shipped store configuration. It uses wallet stages and requires `WALLET_MNEMONIC`; a wallet passphrase defaults to an empty string when wallets are configured.
 :::
 
 | Configuration | Database and scope | Required environment |
 |---|---|---|
 | `config/minimal.toml` | Explicit local SQLite health and item CRUD example; `prefix = "v1"` | None |
-| `config/sqlite.toml` | Local digital-store bootstrap; creates `crudo-store.db`; `prefix = "v1"` | `WALLET_MNEMONIC` |
-| `config/postgres.toml` | PostgreSQL digital-store bootstrap; `prefix = "v1"` | `DATABASE_URL`, `WALLET_MNEMONIC` |
+| `config/store.toml` | Universal digital-store bootstrap; select SQLite or PostgreSQL with `DATABASE_URL`; `prefix = "v1"` | `DATABASE_URL`, `WALLET_MNEMONIC`, `ALTCHA_SECRET`, `ALTCHA_KEY_SECRET` |
 
 ## Choose your next step
 
@@ -137,7 +138,7 @@ ALTCHA is independent of the shipped store configurations. Both store configurat
 
 ### Explore
 
-- **[SQLite](/examples/sqlite)** and **[PostgreSQL](/examples/postgresql)** — compare shipped demo configurations.
+- **[Store](/examples/store)** — run the universal shipped demo with SQLite or PostgreSQL.
 - **[Live store demo](https://demo-crudo.github.io/)**, **[Store API](/reference/demo-api)**, **[Docker](/operations/docker)**, and **[GitHub](https://github.com/melonask/crudo)** — inspect the separately hosted frontend, store bootstrap, packaging, and source.
 
 ## Common recipes

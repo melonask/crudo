@@ -34,7 +34,7 @@ See the [actions reference](./actions#result-modes) for the result-mode response
 |---|---|
 | 400 | Invalid JSON shape, missing parameter, invalid hash/profile input, or out-of-range integer. |
 | 401 | Missing or invalid Basic/Bearer credentials. |
-| 403 | Missing, invalid, expired, reused, or IP-mismatched ALTCHA proof. |
+| 403 | Missing, invalid, expired, reused, or IP-mismatched ALTCHA proof; or an authenticated role not allowed by endpoint `roles`. |
 | 402 | A configured x402 payment-required error. The body is the validated x402 v2 JSON payload and `PAYMENT-REQUIRED` contains its Base64 encoding. |
 | 404 | A `one` result found no row. |
 | 409 | Unique or foreign-key database constraint conflict. |

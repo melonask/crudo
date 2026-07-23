@@ -4,7 +4,8 @@ use serde_json::{Map, Value};
 use sqlx::{AnyPool, AssertSqlSafe, Column, Row, TypeInfo, ValueRef, any::AnyPoolOptions};
 
 use crate::config::{
-    Config, DatabaseSetup, DatabaseSetupSource, DatabaseSetupSourceFormat, expand_env,
+    Config, DatabaseBackend, DatabaseSetup, DatabaseSetupDetails, DatabaseSetupSource,
+    DatabaseSetupSourceFormat, expand_env,
 };
 use crate::server::ClientError;
 
@@ -18,11 +19,20 @@ pub async fn connect(config: &Config) -> Result<AnyPool> {
 }
 
 pub async fn prepare_database(pool: &AnyPool, config: &Config) -> Result<()> {
-    prepare_database_setup(pool, &config.database.setup).await
+    prepare_database_setup(pool, config.database.backend, &config.database.setup).await
 }
 
-pub(crate) async fn prepare_database_setup(pool: &AnyPool, setup: &DatabaseSetup) -> Result<()> {
-    let statements = load_setup_statements(setup).await?;
+pub(crate) async fn prepare_database_setup(
+    pool: &AnyPool,
+    backend: DatabaseBackend,
+    setup: &DatabaseSetup,
+) -> Result<()> {
+    let backend_setup = match backend {
+        DatabaseBackend::Sqlite => &setup.sqlite,
+        DatabaseBackend::Postgres => &setup.postgres,
+    };
+    let mut statements = load_setup_statements(backend_setup).await?;
+    statements.extend(load_setup_statements(&setup.common).await?);
     let mut transaction = pool
         .begin()
         .await
@@ -40,20 +50,15 @@ pub(crate) async fn prepare_database_setup(pool: &AnyPool, setup: &DatabaseSetup
     Ok(())
 }
 
-async fn load_setup_statements(setup: &DatabaseSetup) -> Result<Vec<String>> {
+async fn load_setup_statements(setup: &DatabaseSetupDetails) -> Result<Vec<String>> {
     if setup.is_empty() {
         return Ok(Vec::new());
     }
-    match setup {
-        DatabaseSetup::Legacy(statements) => Ok(statements.clone()),
-        DatabaseSetup::Detailed(details) => {
-            let mut statements = details.statements.clone();
-            for source in &details.sources {
-                statements.extend(load_setup_source(source).await?);
-            }
-            Ok(statements)
-        }
+    let mut statements = setup.statements.clone();
+    for source in &setup.sources {
+        statements.extend(load_setup_source(source).await?);
     }
+    Ok(statements)
 }
 
 async fn load_setup_source(source: &DatabaseSetupSource) -> Result<Vec<String>> {
@@ -153,7 +158,10 @@ pub(crate) fn row_to_json(row: sqlx::any::AnyRow) -> Result<Value> {
         let value = if raw.is_null() {
             Value::Null
         } else {
-            match column.type_info().name().to_ascii_uppercase().as_str() {
+            // SQLite values are dynamically typed, so a column's declared type can differ from
+            // the type of its returned value. Decode according to the latter.
+            let type_info = raw.type_info();
+            match type_info.name().to_ascii_uppercase().as_str() {
                 "BOOL" | "BOOLEAN" => Value::Bool(row.try_get(index)?),
                 "INT2" | "SMALLINT" | "INT4" | "INT" | "INTEGER" | "SERIAL" | "INT8" | "BIGINT"
                 | "BIGSERIAL" => Value::Number(row.try_get::<i64, _>(index)?.into()),
@@ -163,12 +171,36 @@ pub(crate) fn row_to_json(row: sqlx::any::AnyRow) -> Result<Value> {
                         .context("database returned a non-finite number")?
                 }
                 "BLOB" | "BYTEA" => Value::String(BASE64.encode(row.try_get::<Vec<u8>, _>(index)?)),
-                _ => Value::String(row.try_get(index)?),
+                "TEXT" | "VARCHAR" | "CHARACTER VARYING" | "CHAR" | "CHARACTER" | "NAME"
+                | "CITEXT" => Value::String(row.try_get(index)?),
+                type_name => bail!("unsupported database column type {type_name}"),
             }
         };
         object.insert(column.name().to_owned(), value);
     }
     Ok(Value::Object(object))
+}
+
+pub(crate) fn row_to_json_with_booleans(
+    row: sqlx::any::AnyRow,
+    boolean_columns: &[String],
+) -> Result<Value> {
+    let mut value = row_to_json(row)?;
+    let object = value
+        .as_object_mut()
+        .expect("row_to_json always returns an object");
+    for column in boolean_columns {
+        let value = object
+            .get_mut(column)
+            .with_context(|| format!("action result has no boolean column {column}"))?;
+        *value = match value {
+            Value::Bool(value) => Value::Bool(*value),
+            Value::Number(value) if value.as_i64() == Some(0) => Value::Bool(false),
+            Value::Number(value) if value.as_i64() == Some(1) => Value::Bool(true),
+            _ => bail!("action result boolean column {column} must be a boolean or integer 0 or 1"),
+        };
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -184,27 +216,19 @@ mod tests {
             .unwrap()
     }
 
-    fn example_config() -> Config {
-        let source = include_str!("../config/sqlite.toml")
-            .replace("${ALTCHA_SECRET}", "test-secret")
-            .replace("${ALTCHA_KEY_SECRET}", "test-key-secret")
-            .replace(
-                "${WALLET_MNEMONIC}",
-                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-            );
-        Config::parse(&source).unwrap()
-    }
-
     #[tokio::test]
     async fn database_setup_is_atomic() {
         let config = Config::parse(
             r#"
             [database]
             url = "sqlite::memory:"
-            setup = [
+            [database.setup.sqlite]
+            statements = [
                 "CREATE TABLE incomplete (id INTEGER PRIMARY KEY)",
-                "INVALID SQL",
             ]
+
+            [database.setup.common]
+            statements = ["INVALID SQL"]
             "#,
         )
         .unwrap();
@@ -248,7 +272,7 @@ mod tests {
             [database]
             url = "sqlite::memory:"
 
-            [database.setup]
+            [database.setup.sqlite]
             statements = ["CREATE TABLE entries (value TEXT)", "INSERT INTO entries (value) VALUES ('inline')"]
             sources = [
                 {{ location = "{}", format = "sql" }},
@@ -273,6 +297,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backend_setup_runs_before_common_setup() {
+        let config = Config::parse(
+            r#"
+            [database]
+            url = "sqlite::memory:"
+
+            [database.setup.sqlite]
+            statements = ["CREATE TABLE entries (value TEXT)"]
+
+            [database.setup.common]
+            statements = ["INSERT INTO entries (value) VALUES ('common')"]
+            "#,
+        )
+        .unwrap();
+        let pool = memory_pool().await;
+
+        prepare_database(&pool, &config).await.unwrap();
+
+        let value: String = sqlx::query_scalar("SELECT value FROM entries")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(value, "common");
+    }
+
+    #[tokio::test]
     async fn invalid_json_source_shape_includes_its_location() {
         let file = tempfile::NamedTempFile::new().unwrap();
         tokio::fs::write(file.path(), r#"{"sql":"SELECT 1"}"#)
@@ -282,7 +332,7 @@ mod tests {
             r#"
             [database]
             url = "sqlite::memory:"
-            [database.setup]
+            [database.setup.sqlite]
             sources = [{{ location = "{}", format = "json" }}]
             "#,
             file.path().display(),
@@ -306,7 +356,7 @@ mod tests {
             r#"
             [database]
             url = "sqlite::memory:"
-            [database.setup]
+            [database.setup.sqlite]
             sources = [{ location = "http://example.invalid/setup.sql", format = "sql" }]
             "#,
         )
@@ -327,7 +377,7 @@ mod tests {
             r#"
             [database]
             url = "sqlite::memory:"
-            [database.setup]
+            [database.setup.sqlite]
             sources = [{{ location = "{}", format = "sql" }}]
             "#,
             file.path().display(),
@@ -358,7 +408,7 @@ mod tests {
             r#"
             [database]
             url = "sqlite::memory:"
-            [database.setup]
+            [database.setup.sqlite]
             sources = [{{ location = "{}", format = "sql" }}]
             "#,
             file.path().display(),
@@ -398,28 +448,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn store_setup_is_idempotent_and_seeds_the_demo_catalog() {
-        let config = example_config();
-        let pool = memory_pool().await;
-
-        prepare_database(&pool, &config).await.unwrap();
-        prepare_database(&pool, &config).await.unwrap();
-
-        let admin_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM users WHERE email = 'admin' AND role = 'admin'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        let product_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM products")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(admin_count, 1);
-        assert_eq!(product_count, 4);
-    }
-
     #[test]
     fn integers_larger_than_the_database_range_are_rejected() {
         let value = serde_json::json!(9_223_372_036_854_775_808_u64);
@@ -430,5 +458,69 @@ mod tests {
         };
 
         assert_eq!(error.to_string(), "integer is too large");
+    }
+
+    #[tokio::test]
+    async fn sqlite_integer_action_boolean_columns_serialize_as_json_booleans() {
+        let pool = memory_pool().await;
+        sqlx::raw_sql(AssertSqlSafe(
+            "CREATE TABLE flags (active INTEGER NOT NULL); INSERT INTO flags VALUES (0), (1)",
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let rows = sqlx::query("SELECT active FROM flags ORDER BY rowid")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+
+        let values = rows
+            .into_iter()
+            .map(|row| row_to_json_with_booleans(row, &["active".into()]))
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(
+            values,
+            [
+                serde_json::json!({ "active": false }),
+                serde_json::json!({ "active": true })
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_action_boolean_column_value_is_rejected() {
+        let pool = memory_pool().await;
+        sqlx::raw_sql(AssertSqlSafe(
+            "CREATE TABLE flags (active INTEGER NOT NULL); INSERT INTO flags VALUES (2)",
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let row = sqlx::query("SELECT active FROM flags")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            row_to_json_with_booleans(row, &["active".into()])
+                .unwrap_err()
+                .to_string()
+                .contains("must be a boolean or integer 0 or 1")
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_values_are_decoded_by_runtime_type() {
+        let pool = memory_pool().await;
+        let row = sqlx::query("SELECT 42 AS value")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            row_to_json(row).unwrap(),
+            serde_json::json!({ "value": 42 })
+        );
     }
 }

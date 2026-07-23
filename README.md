@@ -36,7 +36,7 @@ This configuration uses local `sqlite://crudo.db?mode=rwc`, `127.0.0.1:3000`, an
 
 ## Optional store demo
 
-The source tree includes SQLite and PostgreSQL digital-store configurations. Use the [live store demo](https://demo-crudo.github.io/) with its visible API URL field (default: `http://127.0.0.1:3000/v1`), or start with the [SQLite](https://melonask.github.io/crudo/examples/sqlite) or [PostgreSQL](https://melonask.github.io/crudo/examples/postgresql) guides. They are development bootstraps, not payment processing or deployment templates.
+The source tree includes one universal digital-store configuration: `config/store.toml`. Set `DATABASE_URL` to either a SQLite or PostgreSQL URL, plus `WALLET_MNEMONIC`, `ALTCHA_SECRET`, and `ALTCHA_KEY_SECRET`; then run `crudo --config config/store.toml`. See the [store guide](https://melonask.github.io/crudo/examples/store). It is a development bootstrap, not payment processing or a deployment template.
 
 ## License
 

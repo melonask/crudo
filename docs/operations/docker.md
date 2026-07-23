@@ -4,6 +4,10 @@
 
 The runtime image runs as an unprivileged user, listens on port `3000`, and ships its minimal configuration at `/etc/crudo/config.toml`.
 
+## Build time
+
+The first cold E2E image build can exceed 10 minutes. Subsequent BuildKit builds reuse Cargo and compilation caches; automation should budget at least 20 minutes rather than aborting and retrying an unchanged build.
+
 ## Minimal API container
 
 The image explicitly runs the packaged `config/minimal.toml`, which configures `prefix = "v1"` and needs no environment variables.
@@ -13,7 +17,7 @@ docker run --rm -p 3000:3000 ghcr.io/melonask/crudo:latest
 curl http://127.0.0.1:3000/v1/health
 ```
 
-## PostgreSQL store demo
+## Store demo with PostgreSQL
 
 Create a network and start PostgreSQL:
 
@@ -26,19 +30,21 @@ docker run -d --name pg --network crudo \
   postgres:18.4-alpine3.24
 ```
 
-The image defaults to `minimal.toml`; it does not package the store configurations as its default. Mount the store configuration explicitly. `config/postgres.toml` requires `DATABASE_URL` and `WALLET_MNEMONIC`, and explicitly configures `prefix = "v1"`.
+The image defaults to `minimal.toml`; it does not package the store configuration as its default. Mount `config/store.toml` explicitly. It requires `DATABASE_URL`, `WALLET_MNEMONIC`, `ALTCHA_SECRET`, and `ALTCHA_KEY_SECRET`, and explicitly configures `prefix = "v1"`.
 
 ```sh
 docker run --rm -p 3000:3000 --network crudo \
   -e DATABASE_URL \
   -e WALLET_MNEMONIC \
-  -v "$PWD/config/postgres.toml:/etc/crudo/config.toml:ro" \
+  -e ALTCHA_SECRET \
+  -e ALTCHA_KEY_SECRET \
+  -v "$PWD/config/store.toml:/etc/crudo/config.toml:ro" \
   ghcr.io/melonask/crudo:latest
 ```
 
 ## Production checklist
 
-- Provide `DATABASE_URL` and `WALLET_MNEMONIC` through the shell environment or a secret manager; do not put credentials in the command line. The SQLite store bootstrap requires `WALLET_MNEMONIC`; PostgreSQL also requires `DATABASE_URL`.
-- To run the SQLite store bootstrap, mount `config/sqlite.toml` explicitly and persist its working directory for `crudo-store.db`.
+- Provide `DATABASE_URL`, `WALLET_MNEMONIC`, `ALTCHA_SECRET`, and `ALTCHA_KEY_SECRET` through the shell environment or a secret manager; do not put credentials in the command line.
+- To run the store with SQLite, set `DATABASE_URL=sqlite://crudo-store.db?mode=rwc`, mount `config/store.toml`, and persist its working directory for `crudo-store.db`.
 - The mounted store bootstraps seed demo-only `admin` / `admin` and self-service demo credit; change or remove the account and do not expose top-ups.
 - Wallet and ALTCHA environment variables are required only by configurations that enable their respective feature.

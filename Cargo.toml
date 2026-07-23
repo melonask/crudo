@@ -1,6 +1,6 @@
 [package]
 name = "crudo"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 description = "A configuration-driven CRUD server"
 include = [

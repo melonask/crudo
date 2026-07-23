@@ -583,11 +583,11 @@ async fn authenticated_clients_can_bypass_altcha_when_configured() {
 }
 
 #[tokio::test]
-async fn sqlite_store_demo_lifecycle_enforces_ownership_and_admin_access() {
+async fn store_demo_lifecycle_enforces_ownership_and_admin_access() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("store.db");
     let database_url = format!("sqlite://{}?mode=rwc", database.display());
-    let source = example_sqlite_config(&database_url);
+    let source = store_config(&database_url);
     let config = Config::parse(&source).unwrap();
     let api_pool = connect(&config).await.unwrap();
     prepare_database(&api_pool, &config).await.unwrap();
@@ -703,19 +703,10 @@ async fn sqlite_store_demo_lifecycle_enforces_ownership_and_admin_access() {
             ))
             .await
             .unwrap();
-        if response.status() == StatusCode::OK {
-            let body = json_response(response).await;
-            assert!(body.is_null() || body.as_array().is_some_and(Vec::is_empty));
-        } else {
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        }
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
     let unauthorized_product = app.clone().oneshot(authorized_json_request("POST", "/v1/admin/products", &alice_token, json!({"slug":format!("forbidden-{suffix}"),"name":"Forbidden","description":"Forbidden","category":"asset","price":1,"fulfillment":"private"}))).await.unwrap();
-    if unauthorized_product.status() == StatusCode::CREATED {
-        assert!(json_response(unauthorized_product).await.is_null());
-    } else {
-        assert_eq!(unauthorized_product.status(), StatusCode::FORBIDDEN);
-    }
+    assert_eq!(unauthorized_product.status(), StatusCode::FORBIDDEN);
     for (path, body) in [
         (
             format!("/v1/admin/products/{product_id}"),
@@ -731,11 +722,7 @@ async fn sqlite_store_demo_lifecycle_enforces_ownership_and_admin_access() {
             .oneshot(authorized_json_request("PUT", &path, &alice_token, body))
             .await
             .unwrap();
-        if response.status() == StatusCode::OK {
-            assert!(json_response(response).await.is_null());
-        } else {
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        }
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
     assert_eq!(
         json_response(
@@ -820,7 +807,7 @@ async fn sqlite_store_demo_lifecycle_enforces_ownership_and_admin_access() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|row| row["external_id"] == purchase_id)
+            .any(|row| row["external_id"] == purchase_id && !row["processed_at"].is_null())
     );
     assert!(
         bob_history
@@ -842,12 +829,13 @@ async fn sqlite_store_demo_lifecycle_enforces_ownership_and_admin_access() {
     assert_eq!(me_balance(&app, &alice_token).await, 3_701);
 }
 
-fn example_sqlite_config(database_url: &str) -> String {
-    include_str!("../config/sqlite.toml")
-        .replace("sqlite://crudo-store.db?mode=rwc", database_url)
+fn store_config(database_url: &str) -> String {
+    include_str!("../config/store.toml")
+        .replace("${DATABASE_URL}", database_url)
         .replace("${WALLET_MNEMONIC}", TEST_WALLET_MNEMONIC)
         .replace("${ALTCHA_SECRET}", "test-altcha-secret")
         .replace("${ALTCHA_KEY_SECRET}", "test-altcha-key-secret")
+        .replace("requests = 30", "requests = 0")
         .replace("cost = 10000", "cost = 1")
 }
 

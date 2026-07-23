@@ -38,7 +38,7 @@ Use `hash` for request fields that must be stored as Argon2 hashes. The original
 
 ```toml
 [actions.create_account]
-sql = "INSERT INTO accounts (email, password) VALUES (?, ?) RETURNING id, email"
+sql = "INSERT INTO accounts (email, password) VALUES ($1, $2) RETURNING id, email"
 params = ["email", "password"]
 hash = ["password"]
 result = "one"
@@ -55,6 +55,19 @@ This action returns the inserted account without returning the password hash.
 | `one` | Exactly one row object | `404 {"error":"resource not found"}` |
 | `optional` | One row object or `null` | `null` with success status |
 | `many` | Array of row objects | Empty array |
+
+## Boolean result columns
+
+Set `boolean_columns` to normalize selected result columns to JSON booleans. Each name must be nonempty and appear only once. Every returned row must contain each listed column, and its value must be a native boolean or integer `0` or `1`; missing columns and other values fail the action.
+
+```toml
+[actions.list_products]
+sql = "SELECT id, active FROM products ORDER BY id"
+boolean_columns = ["active"]
+result = "many"
+```
+
+This provides cross-backend response parity when one engine returns a native boolean and the other returns `0` or `1`.
 
 ## Success controls
 
@@ -94,16 +107,7 @@ The payload requires numeric `x402Version = 2`, object `resource`, and an `accep
 
 ## SQLite and PostgreSQL parameters
 
-SQLite uses positional `?` placeholders.
-
-```toml
-[actions.get_user]
-sql = "SELECT id, email FROM users WHERE id = ?"
-params = ["id"]
-result = "one"
-```
-
-PostgreSQL uses numbered placeholders. Path and query values are strings, so compare them with numeric columns using an explicit cast.
+Universal bound SQL uses numbered `$1`, `$2`, and higher placeholders for both engines. Crudo performs no runtime SQL translation. Path and query values are strings, so compare them with numeric columns using an explicit cast where needed.
 
 ```toml
 [actions.get_user]
@@ -112,4 +116,4 @@ params = ["id"]
 result = "one"
 ```
 
-Both actions bind the incoming `id`; the PostgreSQL form converts it for a `BIGINT` comparison.
+Use a universal string only when it is valid for both engines. Otherwise provide both required, nonempty variants: `sql = { sqlite = "...$1", postgres = "...$1::BIGINT" }`.

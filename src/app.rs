@@ -1,14 +1,15 @@
 use anyhow::Result;
 use sqlx::AnyPool;
 
-use crate::{Config, build_router, config::DatabaseSetup, database::prepare_database_setup};
+use crate::{Config, build_router, database::prepare_database_setup};
 
 /// Builds and serves the configured application until an OS shutdown signal arrives.
 pub async fn run(pool: AnyPool, config: Config) -> Result<()> {
     let address = config.server.address.clone();
-    let setup: DatabaseSetup = config.database.setup.clone();
+    let setup = config.database.setup.clone();
+    let backend = config.database.backend;
     let app = build_router(pool.clone(), config)?;
-    prepare_database_setup(&pool, &setup).await?;
+    prepare_database_setup(&pool, backend, &setup).await?;
     let listener = tokio::net::TcpListener::bind(&address).await?;
     serve(listener, app).await
 }
@@ -56,7 +57,8 @@ mod tests {
             r#"
             [database]
             url = "sqlite::memory:"
-            setup = ["CREATE TABLE should_not_exist (id INTEGER PRIMARY KEY)"]
+            [database.setup.sqlite]
+            statements = ["CREATE TABLE should_not_exist (id INTEGER PRIMARY KEY)"]
 
             [[endpoints]]
             method = "GET"

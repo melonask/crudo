@@ -5,20 +5,24 @@ This SQLite configuration hashes a password at registration, exchanges Basic cre
 ```toml
 [database]
 url = "sqlite://auth-notes.db?mode=rwc"
-setup = [
-  "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL)",
+
+[database.setup.sqlite]
+statements = [
+  "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE, password TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'customer')",
   "CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at INTEGER NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id))",
   "CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, body TEXT NOT NULL, FOREIGN KEY (user_id) REFERENCES users(id))"
 ]
 
 [auth.basic]
-sql = "SELECT id, password FROM users WHERE email = ?"
+sql = "SELECT id, password, role FROM users WHERE email = $1"
 owner = "id"
 password = "password"
+role = "role"
 
 [auth.bearer]
-sql = "SELECT user_id FROM sessions WHERE token = ? AND expires_at > unixepoch()"
+sql = "SELECT s.user_id, u.role FROM sessions AS s JOIN users AS u ON u.id = s.user_id WHERE s.token = $1 AND s.expires_at > unixepoch()"
 owner = "user_id"
+role = "role"
 
 [[endpoints]]
 method = "POST"
@@ -36,6 +40,7 @@ method = "POST"
 path = "/notes"
 action = "create_note"
 auth = ["bearer"]
+roles = ["customer"]
 
 [[endpoints]]
 method = "GET"
@@ -44,27 +49,27 @@ action = "list_notes"
 auth = ["bearer"]
 
 [actions.create_user]
-sql = "INSERT INTO users (email, password) VALUES (?, ?) RETURNING id, email"
+sql = "INSERT INTO users (email, password) VALUES ($1, $2) RETURNING id, email"
 params = ["email", "password"]
 hash = ["password"]
 result = "one"
 status = 201
 
 [actions.create_token]
-sql = "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, unixepoch() + 3600) RETURNING token, expires_at"
+sql = "INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, unixepoch() + 3600) RETURNING token, expires_at"
 params = ["$token", "$owner"]
 result = "one"
 status = 201
 no_store = true
 
 [actions.create_note]
-sql = "INSERT INTO notes (user_id, body) VALUES (?, ?) RETURNING id, body"
+sql = "INSERT INTO notes (user_id, body) VALUES ($1, $2) RETURNING id, body"
 params = ["$owner", "body"]
 result = "one"
 status = 201
 
 [actions.list_notes]
-sql = "SELECT id, body FROM notes WHERE user_id = ? ORDER BY id"
+sql = "SELECT id, body FROM notes WHERE user_id = $1 ORDER BY id"
 params = ["$owner"]
 result = "many"
 ```
@@ -87,4 +92,4 @@ Example token and note responses:
 {"id":1,"body":"private note"}
 ```
 
-The token action sends `Cache-Control: no-store`. Tokens expire after one hour, and the Bearer SQL rejects expired sessions. Use HTTPS, keep tokens out of logs and URLs, choose a production password policy, and add a server-side session-revocation policy if your application needs one.
+The token action sends `Cache-Control: no-store`. Tokens expire after one hour, and the Bearer SQL rejects expired sessions. The `role` columns select the authenticated role; `roles = ["customer"]` makes that endpoint mandatory-auth only and returns `403` to authenticated callers with another role. Use HTTPS, keep tokens out of logs and URLs, choose a production password policy, and add a server-side session-revocation policy if your application needs one.

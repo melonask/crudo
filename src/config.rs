@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -23,12 +23,78 @@ pub struct Config {
 impl Config {
     pub fn parse(source: &str) -> Result<Self> {
         let source = expand_env(source)?;
-        toml::from_str(&source).context("invalid configuration")
+        Self::parse_expanded(&source)
     }
 
     pub fn set_address(&mut self, address: String) {
         self.server.address = address;
     }
+
+    fn validate(mut self) -> Result<Self> {
+        self.database.backend = DatabaseBackend::from_url(&self.database.url)?;
+        for (name, action) in &self.actions {
+            action.sql.validate(&format!("action {name} SQL"))?;
+            let mut boolean_columns = HashSet::new();
+            for column in &action.boolean_columns {
+                if column.trim().is_empty() {
+                    bail!("action {name} boolean_columns must not contain empty values");
+                }
+                if !boolean_columns.insert(column) {
+                    bail!("action {name} repeats boolean column {column}");
+                }
+            }
+            if let Some(wallets) = &action.wallets {
+                wallets.sql.validate(&format!("action {name} wallet SQL"))?;
+            }
+            for error in &action.errors {
+                if let Some(x402) = &error.x402 {
+                    x402.sql.validate(&format!("action {name} x402 SQL"))?;
+                }
+            }
+        }
+        if let Some(auth) = &self.auth.basic {
+            auth.sql.validate("basic authentication SQL")?;
+            validate_auth_column("basic authentication owner", &auth.owner)?;
+            validate_auth_column("basic authentication password", &auth.password)?;
+            if let Some(role) = &auth.role {
+                validate_auth_column("basic authentication role", role)?;
+            }
+        }
+        if let Some(auth) = &self.auth.bearer {
+            auth.sql.validate("bearer authentication SQL")?;
+            validate_auth_column("bearer authentication owner", &auth.owner)?;
+            if let Some(role) = &auth.role {
+                validate_auth_column("bearer authentication role", role)?;
+            }
+        }
+        for endpoint in &self.endpoints {
+            let mut roles = HashSet::new();
+            for role in &endpoint.roles {
+                if role.trim().is_empty() {
+                    bail!(
+                        "endpoint {} roles must not contain empty values",
+                        endpoint.path
+                    );
+                }
+                if !roles.insert(role) {
+                    bail!("endpoint {} repeats role {role}", endpoint.path);
+                }
+            }
+        }
+        Ok(self)
+    }
+
+    fn parse_expanded(source: &str) -> Result<Self> {
+        let config: Self = toml::from_str(source).context("invalid configuration")?;
+        config.validate()
+    }
+}
+
+fn validate_auth_column(context: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("{context} must not be empty");
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -38,6 +104,8 @@ pub(crate) struct Database {
     pub(crate) url: String,
     #[serde(default)]
     pub(crate) setup: DatabaseSetup,
+    #[serde(skip)]
+    pub(crate) backend: DatabaseBackend,
 }
 
 impl Default for Database {
@@ -45,30 +113,41 @@ impl Default for Database {
         Self {
             url: default_database_url(),
             setup: DatabaseSetup::default(),
+            backend: DatabaseBackend::Sqlite,
         }
     }
 }
 
-#[derive(Clone, Deserialize)]
-#[serde(untagged)]
-pub(crate) enum DatabaseSetup {
-    Legacy(Vec<String>),
-    Detailed(DatabaseSetupDetails),
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DatabaseBackend {
+    #[default]
+    Sqlite,
+    Postgres,
 }
 
-impl DatabaseSetup {
-    pub(crate) fn is_empty(&self) -> bool {
-        match self {
-            Self::Legacy(statements) => statements.is_empty(),
-            Self::Detailed(details) => details.statements.is_empty() && details.sources.is_empty(),
+impl DatabaseBackend {
+    fn from_url(url: &str) -> Result<Self> {
+        if url.starts_with("sqlite:") {
+            Ok(Self::Sqlite)
+        } else if url.starts_with("postgres:") || url.starts_with("postgresql:") {
+            Ok(Self::Postgres)
+        } else {
+            bail!(
+                "database.url must use a SQLite (sqlite:) or PostgreSQL (postgres: or postgresql:) URL"
+            )
         }
     }
 }
 
-impl Default for DatabaseSetup {
-    fn default() -> Self {
-        Self::Legacy(Vec::new())
-    }
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DatabaseSetup {
+    #[serde(default)]
+    pub(crate) common: DatabaseSetupDetails,
+    #[serde(default)]
+    pub(crate) sqlite: DatabaseSetupDetails,
+    #[serde(default)]
+    pub(crate) postgres: DatabaseSetupDetails,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -78,6 +157,48 @@ pub(crate) struct DatabaseSetupDetails {
     pub(crate) statements: Vec<String>,
     #[serde(default)]
     pub(crate) sources: Vec<DatabaseSetupSource>,
+}
+
+impl DatabaseSetupDetails {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.statements.is_empty() && self.sources.is_empty()
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum BackendSql {
+    Universal(String),
+    Variants(BackendSqlVariants),
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BackendSqlVariants {
+    pub(crate) sqlite: String,
+    pub(crate) postgres: String,
+}
+
+impl BackendSql {
+    pub(crate) fn resolve(&self, backend: DatabaseBackend) -> &str {
+        match (self, backend) {
+            (Self::Universal(sql), _) => sql,
+            (Self::Variants(sql), DatabaseBackend::Sqlite) => &sql.sqlite,
+            (Self::Variants(sql), DatabaseBackend::Postgres) => &sql.postgres,
+        }
+    }
+
+    fn validate(&self, name: &str) -> Result<()> {
+        match self {
+            Self::Universal(sql) if sql.trim().is_empty() => bail!("{name} must not be empty"),
+            Self::Variants(sql)
+                if sql.sqlite.trim().is_empty() || sql.postgres.trim().is_empty() =>
+            {
+                bail!("{name} SQLite and PostgreSQL variants must not be empty")
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -201,6 +322,8 @@ pub(crate) struct Endpoint {
     #[serde(default)]
     pub(crate) auth_optional: bool,
     #[serde(default)]
+    pub(crate) roles: Vec<String>,
+    #[serde(default)]
     pub(crate) altcha: bool,
     #[serde(default = "default_true")]
     pub(crate) altcha_for_authenticated: bool,
@@ -225,7 +348,9 @@ fn default_true() -> bool {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Action {
-    pub(crate) sql: String,
+    pub(crate) sql: BackendSql,
+    #[serde(default)]
+    pub(crate) boolean_columns: Vec<String>,
     #[serde(default)]
     pub(crate) params: Vec<String>,
     #[serde(default)]
@@ -247,7 +372,7 @@ pub(crate) struct ActionWallets {
     pub(crate) profiles: Vec<String>,
     pub(crate) profile: Option<String>,
     pub(crate) values: HashMap<String, String>,
-    pub(crate) sql: String,
+    pub(crate) sql: BackendSql,
     pub(crate) params: Vec<String>,
 }
 
@@ -317,7 +442,7 @@ pub(crate) struct ActionError {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ActionX402 {
-    pub(crate) sql: String,
+    pub(crate) sql: BackendSql,
     #[serde(default)]
     pub(crate) params: Vec<String>,
     pub(crate) column: String,
@@ -350,16 +475,18 @@ pub(crate) struct Authentication {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BasicAuth {
-    pub(crate) sql: String,
+    pub(crate) sql: BackendSql,
     pub(crate) owner: String,
     pub(crate) password: String,
+    pub(crate) role: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BearerAuth {
-    pub(crate) sql: String,
+    pub(crate) sql: BackendSql,
     pub(crate) owner: String,
+    pub(crate) role: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -425,7 +552,7 @@ pub async fn load_config(location: &str) -> Result<Config> {
     };
 
     let source = expand_env(&source)?;
-    toml::from_str(&source).with_context(|| format!("invalid configuration in {location}"))
+    Config::parse_expanded(&source).with_context(|| format!("invalid configuration in {location}"))
 }
 
 pub(crate) fn expand_env(source: &str) -> Result<String> {
@@ -498,51 +625,42 @@ mod tests {
         let config = Config::parse("").unwrap();
 
         assert_eq!(config.database.url, "sqlite://crudo.db?mode=rwc");
-        assert!(config.database.setup.is_empty());
+        assert!(config.database.setup.sqlite.is_empty());
     }
 
     #[test]
-    fn database_setup_without_url_uses_local_sqlite_default() {
+    fn database_setup_is_backend_specific_and_legacy_setup_is_rejected() {
         let config = Config::parse(
             r#"
-            [database]
-            setup = ["CREATE TABLE entries (id INTEGER PRIMARY KEY)"]
+            [database.setup.sqlite]
+            statements = ["CREATE TABLE entries (id INTEGER PRIMARY KEY)"]
             "#,
         )
         .unwrap();
 
         assert_eq!(config.database.url, "sqlite://crudo.db?mode=rwc");
-        match config.database.setup {
-            DatabaseSetup::Legacy(statements) => {
-                assert_eq!(
-                    statements,
-                    ["CREATE TABLE entries (id INTEGER PRIMARY KEY)"]
-                );
-            }
-            DatabaseSetup::Detailed(_) => panic!("legacy setup parsed as detailed setup"),
-        }
+        assert_eq!(config.database.setup.sqlite.statements.len(), 1);
+        assert!(Config::parse("[database]\nsetup = [\"SELECT 1\"]").is_err());
     }
 
     #[test]
     fn detailed_database_setup_parses_strictly() {
         let config = Config::parse(
             r#"
-            [database.setup]
+            [database.setup.sqlite]
             statements = ["CREATE TABLE entries (id INTEGER PRIMARY KEY)"]
             sources = [{ location = "seed.json", format = "json" }]
             "#,
         )
         .unwrap();
 
-        let DatabaseSetup::Detailed(setup) = config.database.setup else {
-            panic!("detailed setup parsed as legacy setup");
-        };
+        let setup = config.database.setup.sqlite;
         assert_eq!(setup.statements.len(), 1);
         assert_eq!(setup.sources.len(), 1);
         assert!(
             Config::parse(
                 r#"
-            [database.setup]
+            [database.setup.sqlite]
             unknown = true
             "#
             )
@@ -551,7 +669,7 @@ mod tests {
         assert!(
             Config::parse(
                 r#"
-            [database.setup]
+            [database.setup.sqlite]
             sources = [{ location = "seed.sql", format = "sql", unknown = true }]
             "#
             )
@@ -576,7 +694,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.database.url, "sqlite://crudo.db?mode=rwc");
-        assert!(config.database.setup.is_empty());
+        assert!(config.database.setup.sqlite.is_empty());
         assert_eq!(config.endpoints.len(), 1);
         assert!(config.actions.contains_key("health"));
     }
@@ -608,7 +726,104 @@ mod tests {
     }
 
     #[test]
-    fn minimal_configuration_needs_no_environment_variables() {
-        Config::parse(include_str!("../config/minimal.toml")).unwrap();
+    fn sql_variants_select_by_backend_and_urls_are_validated() {
+        let sqlite = Config::parse(
+            "[actions.test]\nsql = { sqlite = \"SELECT 1\", postgres = \"SELECT 2\" }",
+        )
+        .unwrap();
+        assert_eq!(
+            sqlite.actions["test"].sql.resolve(DatabaseBackend::Sqlite),
+            "SELECT 1"
+        );
+        assert_eq!(
+            sqlite.actions["test"]
+                .sql
+                .resolve(DatabaseBackend::Postgres),
+            "SELECT 2"
+        );
+        assert!(Config::parse("[database]\nurl = \"mysql://localhost/db\"").is_err());
+        assert!(
+            Config::parse("[actions.test]\nsql = { sqlite = \"\", postgres = \"SELECT 2\" }")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn endpoint_roles_must_be_nonempty_and_unique() {
+        let base = "[[endpoints]]\nmethod = \"GET\"\npath = \"/x\"\naction = \"x\"\nroles = ";
+        assert!(Config::parse(&format!("{base}[\"admin\", \"admin\"]")).is_err());
+        assert!(Config::parse(&format!("{base}[\"\"]")).is_err());
+    }
+
+    #[test]
+    fn action_boolean_columns_must_be_nonempty_and_unique() {
+        assert!(
+            Config::parse(
+                "[actions.test]\nsql = \"SELECT 1\"\nboolean_columns = [\"active\", \"active\"]"
+            )
+            .is_err()
+        );
+        assert!(
+            Config::parse("[actions.test]\nsql = \"SELECT 1\"\nboolean_columns = [\"\"]").is_err()
+        );
+    }
+
+    #[test]
+    fn authentication_columns_must_not_be_whitespace() {
+        assert!(
+            Config::parse(
+                r#"
+            [auth.basic]
+            sql = "SELECT 1"
+            owner = "owner"
+            password = "password"
+            role = " "
+            "#,
+            )
+            .is_err()
+        );
+        assert!(
+            Config::parse(
+                r#"
+            [auth.bearer]
+            sql = "SELECT 1"
+            owner = "owner"
+            role = "\t"
+            "#,
+            )
+            .is_err()
+        );
+        assert!(
+            Config::parse(
+                r#"
+            [auth.basic]
+            sql = "SELECT 1"
+            owner = " "
+            password = "password"
+            "#,
+            )
+            .is_err()
+        );
+        assert!(
+            Config::parse(
+                r#"
+            [auth.basic]
+            sql = "SELECT 1"
+            owner = "owner"
+            password = " "
+            "#,
+            )
+            .is_err()
+        );
+        assert!(
+            Config::parse(
+                r#"
+            [auth.bearer]
+            sql = "SELECT 1"
+            owner = " "
+            "#,
+            )
+            .is_err()
+        );
     }
 }

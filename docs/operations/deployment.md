@@ -8,8 +8,8 @@
 - Treat startup database setup as transactional setup, not as a migration framework.
 - Select a reviewed production configuration explicitly with `--config`; do not rely on the working directory's `Crudo.toml`.
 - Set an explicit production database URL. Omitting `[database]` uses local `sqlite://crudo.db?mode=rwc` and runs no setup statements.
-- Do not deploy either shipped store bootstrap unchanged: change or remove its seeded `admin` / `admin`, remove self-service demo top-ups, and replace bootstrap setup with managed migrations and payment-provider flows.
-- The shipped store configs require `ALTCHA_SECRET` and `ALTCHA_KEY_SECRET`; generate, inject, and rotate independent high-entropy values securely.
+- Do not deploy the shipped store bootstrap unchanged: change or remove its seeded `admin` / `admin`, remove self-service demo top-ups, and replace bootstrap setup with managed migrations and payment-provider flows.
+- `config/store.toml` requires `DATABASE_URL`, `WALLET_MNEMONIC`, `ALTCHA_SECRET`, and `ALTCHA_KEY_SECRET`; generate, inject, and rotate secrets securely.
 
 ## Proxy and TLS checklist
 
@@ -19,7 +19,7 @@
 - Configure exact CORS origins.
 - Ensure health checks do not consume protected endpoints.
 - The optional store frontend is published at [demo-crudo.github.io](https://demo-crudo.github.io/) and sourced from [demo-crudo/demo-crudo.github.io](https://github.com/demo-crudo/demo-crudo.github.io); Crudo serves only configured API routes. Its visible **API URL** field accepts any compatible API base and defaults exactly to `http://127.0.0.1:3000/v1`.
-- The shipped store configurations explicitly set `prefix = "v1"` and allow `https://demo-crudo.github.io` plus `http://127.0.0.1:8000` and `http://localhost:8000`. Custom deployments must configure their own exact origins; TOML supports existing `${ENV}` expansion, so origins can be deployment configuration without changing Rust. Independently of CORS, an HTTPS page targeting plain HTTP localhost may be blocked by browser local-network or mixed-content policy.
+- The shipped store configuration explicitly sets `prefix = "v1"` and allows `https://demo-crudo.github.io` plus `http://127.0.0.1:8000` and `http://localhost:8000`. Custom deployments must configure their own exact origins; TOML supports existing `${ENV}` expansion, so origins can be deployment configuration without changing Rust. Independently of CORS, an HTTPS page targeting plain HTTP localhost may be blocked by browser local-network or mixed-content policy.
 
 ::: warning Direct-peer IP behavior
 Crudo's rate limiter and ALTCHA IP binding use the direct TCP peer. Behind a proxy, that is normally the proxy address rather than the browser.

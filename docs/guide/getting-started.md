@@ -36,13 +36,14 @@ crudo --config path/to/config.toml
 crudo --config https://config.example.com/crudo.toml
 ```
 
-Installed binaries do not need a repository-relative `config/sqlite.toml`; it is a source-tree store bootstrap with `prefix = "v1"`. For production, select an explicit reviewed configuration, state its database URL and schema-management plan, and retain `127.0.0.1:3000` unless your network controls require another address. See the [SQLite store demo](/examples/sqlite) or [PostgreSQL store demo](/examples/postgresql).
+Installed binaries do not need the source-tree `config/store.toml` bootstrap with `prefix = "v1"`. For production, select an explicit reviewed configuration, state its database URL and schema-management plan, and retain `127.0.0.1:3000` unless your network controls require another address. See the [store demo](/examples/store).
 
 ## Choose SQL placeholders
 
 | Database | Placeholder style | Notes |
 |---|---|---|
-| SQLite | `?` | Use SQLite SQL syntax. |
-| PostgreSQL | `$1`, `$2` | Cast string path/query values before comparing them to numeric columns. |
+| SQLite and PostgreSQL | `$1`, `$2` | Universal bound SQL uses numbered placeholders for both engines; cast string path/query values where the selected SQL needs it. |
+
+Crudo does not translate SQL. Use `{ sqlite = "...", postgres = "..." }` when backend syntax differs.
 
 Next, learn the [core concepts](./core-concepts) and copy configuration into your project.

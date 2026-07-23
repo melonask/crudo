@@ -27,31 +27,27 @@ impl Backend {
     }
 
     fn config(self) -> String {
-        match self {
-            Self::Sqlite => {
-                let database_url = format!(
-                    "sqlite:///tmp/crudo-e2e-{}-{}.db?mode=rwc",
-                    std::process::id(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos()
-                );
-                include_str!("../config/sqlite.toml")
-                    .replace("sqlite://crudo-store.db?mode=rwc", &database_url)
-                    .replace("requests = 30", "requests = 0")
+        let database_url = match self {
+            Self::Sqlite => format!(
+                "sqlite:///tmp/crudo-e2e-{}-{}.db?mode=rwc",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ),
+            Self::Postgres => {
+                env::var("DATABASE_URL").expect("DATABASE_URL is required for postgres E2E")
             }
-            Self::Postgres => include_str!("../config/postgres.toml")
-                .replace(
-                    "${DATABASE_URL}",
-                    &env::var("DATABASE_URL").expect("DATABASE_URL is required for postgres E2E"),
-                )
-                .replace("requests = 30", "requests = 0"),
-        }
-        .replace("${WALLET_MNEMONIC}", TEST_WALLET_MNEMONIC)
-        .replace("${ALTCHA_SECRET}", "test-altcha-secret")
-        .replace("${ALTCHA_KEY_SECRET}", "test-altcha-key-secret")
-        .replace("cost = 10000", "cost = 1")
+        };
+
+        include_str!("../config/store.toml")
+            .replace("${DATABASE_URL}", &database_url)
+            .replace("${WALLET_MNEMONIC}", TEST_WALLET_MNEMONIC)
+            .replace("${ALTCHA_SECRET}", "test-altcha-secret")
+            .replace("${ALTCHA_KEY_SECRET}", "test-altcha-key-secret")
+            .replace("requests = 30", "requests = 0")
+            .replace("cost = 10000", "cost = 1")
     }
 }
 
@@ -386,19 +382,10 @@ async fn assert_customer_restrictions(
             .send()
             .await
             .unwrap();
-        if response.status() == StatusCode::OK {
-            let body = response.json::<Value>().await.unwrap();
-            assert!(body.is_null() || body.as_array().is_some_and(Vec::is_empty));
-        } else {
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        }
-    }
-    let response = post(client, &format!("{base}/admin/products"), token, json!({"slug":format!("forbidden-{suffix}"),"name":"Forbidden","description":"Forbidden","category":"asset","price":1,"fulfillment":"private"})).await;
-    if response.status() == StatusCode::CREATED {
-        assert!(response.json::<Value>().await.unwrap().is_null());
-    } else {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
+    let response = post(client, &format!("{base}/admin/products"), token, json!({"slug":format!("forbidden-{suffix}"),"name":"Forbidden","description":"Forbidden","category":"asset","price":1,"fulfillment":"private"})).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     for (path, body) in [
         (
             format!("{base}/admin/products/{product_id}"),
@@ -416,11 +403,7 @@ async fn assert_customer_restrictions(
             .send()
             .await
             .unwrap();
-        if response.status() == StatusCode::OK {
-            assert!(response.json::<Value>().await.unwrap().is_null());
-        } else {
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        }
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
 
@@ -438,7 +421,7 @@ async fn assert_history_ownership(
             .as_array()
             .unwrap()
             .iter()
-            .any(|row| row["external_id"] == external_id)
+            .any(|row| row["external_id"] == external_id && !row["processed_at"].is_null())
     );
     assert!(
         bob_history
@@ -546,6 +529,13 @@ async fn assert_admin_views(
             .unwrap()
             .iter()
             .any(|row| row["external_id"] == bob_purchase)
+    );
+    assert!(
+        transactions
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| !row["processed_at"].is_null())
     );
     let alice_transactions = get(
         client,

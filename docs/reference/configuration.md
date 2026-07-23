@@ -4,7 +4,7 @@ All fields are TOML fields. Unlisted defaults are not inferred.
 
 ## Configuration selection
 
-The CLI uses `--config` to select a local path or HTTPS URL. Without it, it reads `./Crudo.toml`. If neither is available, startup fails with guidance. An unreadable or malformed selected configuration also fails startup. Installed binaries do not require a repository-relative `config/sqlite.toml`; it is a source-tree store bootstrap.
+The CLI uses `--config` to select a local path or HTTPS URL. Without it, it reads `./Crudo.toml`. If neither is available, startup fails with guidance. An unreadable or malformed selected configuration also fails startup. Installed binaries do not require the source-tree `config/store.toml` bootstrap.
 
 ::: danger Strict schema validation
 All static configuration tables reject unknown fields. A misspelled protection, limit, endpoint, action, authentication, ALTCHA, or wallet field fails startup rather than silently using a default.
@@ -16,27 +16,22 @@ Dynamic action names and wallet `values` keys remain user-defined map keys.
 
 | Field | Required | Default | Validation / behavior |
 |---|---|---|---|
-| `database.url` | No | `sqlite://crudo.db?mode=rwc` | SQLx SQLite or PostgreSQL connection URL. |
-| `database.setup` | No | `[]` | Legacy inline statement array, or the detailed setup table described below. All loaded statements run atomically before serving. |
+| `database.url` | No | `sqlite://crudo.db?mode=rwc` | Only `sqlite:` or `postgres:`/`postgresql:` connection URLs are accepted. |
+| `database.setup.sqlite` | No | empty | SQLite-only setup statements and sources. |
+| `database.setup.postgres` | No | empty | PostgreSQL-only setup statements and sources. |
+| `database.setup.common` | No | empty | Setup statements and sources for both backends. |
 
-Omitting `[database]` selects the local SQLite URL above and runs no setup statements. It does not create application tables; define `database.setup` or manage the schema separately when routes need tables.
+Omitting `[database]` selects the local SQLite URL above and runs no setup statements. It does not create application tables; define the applicable `database.setup.sqlite`, `database.setup.postgres`, or `database.setup.common` table, or manage the schema separately when routes need tables.
 
 ### Database setup sources
 
-The legacy form remains valid:
-
-```toml
-[database]
-setup = ["CREATE TABLE entries (id INTEGER PRIMARY KEY)"]
-```
-
-For inline statements plus ordered files or HTTPS sources, use the detailed form. Inline statements run first, followed by each `sources` entry in listed order. Configuration and every loaded source expand `${NAME}` environment variables; an unset, empty-name, or unclosed reference fails startup.
+Setup is strictly partitioned into `sqlite`, `postgres`, and `common` tables. For the selected URL, Crudo loads the selected backend table first and `common` second. Within each table, inline `statements` run first, then `sources` in listed order. It loads and validates both tables and every source before opening one transaction; all resulting statements execute in that order in that one transaction. Any failure rolls it back.
 
 ```toml
 [database]
 url = "sqlite://app.db?mode=rwc"
 
-[database.setup]
+[database.setup.sqlite]
 statements = ["CREATE TABLE entries (id INTEGER PRIMARY KEY, body TEXT NOT NULL)"]
 sources = [
   { location = "schema/seed.sql", format = "sql" },
@@ -44,7 +39,7 @@ sources = [
 ]
 ```
 
-`location` is a local text-file path or an HTTPS URL; plain HTTP is rejected. A `sql` source must be nonempty and is executed as one raw SQL batch. A `json` source must be either an array of nonempty SQL strings or a strict object containing only `{"statements":[...]}`. Crudo loads and validates every source before beginning one transaction, then executes the resulting statements in order; a failure rolls back the setup transaction.
+`location` is a local text-file path or an HTTPS URL; plain HTTP is rejected. A `sql` source must be nonempty and is executed as one raw SQL batch. A `json` source must be either an array of nonempty SQL strings or a strict object containing only `{"statements":[...]}`. Configuration and every loaded source expand `${NAME}` environment variables; an unset, empty-name, or unclosed reference fails startup.
 
 ## Server and CORS
 
@@ -77,6 +72,7 @@ Server limits apply by default. `[endpoints.limits]` accepts optional versions o
 | `endpoints.action` | Yes | — | Must name an existing action. |
 | `endpoints.auth` | No | `[]` | Contains `basic` and/or `bearer`; each needs its matching auth table. |
 | `endpoints.auth_optional` | No | `false` | Valid only when `auth` is configured. |
+| `endpoints.roles` | No | `[]` | Nonempty, unique allowed roles; requires mandatory authentication and a role column for every configured method. |
 | `endpoints.altcha` | No | `false` | Requires `[altcha]` when true. |
 | `endpoints.altcha_for_authenticated` | No | `true` | May be false only when `altcha` and `auth` are configured. |
 | `endpoints.limits` | No | — | Optional overrides for all five limit fields. |
@@ -91,12 +87,27 @@ Server limits apply by default. `[endpoints.limits]` accepts optional versions o
 | `actions.NAME.sql` | Yes | — | SQL configured for the action. |
 | `actions.NAME.params` | No | `[]` | Bound in declared order. |
 | `actions.NAME.hash` | No | `[]` | Named request fields to Argon2-hash. |
+| `actions.NAME.boolean_columns` | No | `[]` | Result-column names normalized to JSON booleans; names must be nonempty and unique. |
 | `actions.NAME.result` | No | `execute` | `execute`, `one`, `optional`, or `many`. |
 | `actions.NAME.status` | No | `200` | Must be a valid 2xx status at startup. |
 | `actions.NAME.no_store` | No | `false` | Adds `Cache-Control: no-store` when true. |
 | `actions.NAME.errors` | No | `[]` | Configured database-message mappings. |
 
 Each `[[actions.NAME.errors]]` entry requires `database_message`, a 400–599 `status`, and response `message`.
+
+For each configured `boolean_columns` name, every returned row must contain that column. Crudo serializes a native boolean or integer `0`/`1` as a JSON boolean; a missing column or any other value fails the action. Use this when SQLite and PostgreSQL return equivalent boolean values with different native representations.
+
+### Backend SQL
+
+Every bound SQL field accepts either one nonempty universal string or an object with both nonempty variants:
+
+```toml
+sql = "SELECT id FROM entries WHERE id = $1"
+# or
+sql = { sqlite = "SELECT id FROM entries WHERE id = $1", postgres = "SELECT id FROM entries WHERE id = $1::BIGINT" }
+```
+
+Universal bound SQL uses `$1`, `$2`, and so on for both SQLite and PostgreSQL. Crudo does not translate SQL at runtime; use variants when syntax differs.
 
 ### x402 payment-required errors
 
@@ -109,7 +120,7 @@ status = 402
 message = "insufficient balance"
 
 [actions.purchase.errors.x402]
-sql = "SELECT payment_required FROM payment_requirements WHERE product_id = ?"
+sql = "SELECT payment_required FROM payment_requirements WHERE product_id = $1"
 params = ["product_id"]
 column = "payment_required"
 ```
@@ -127,8 +138,14 @@ Authentication tables are optional until an endpoint names their method.
 | `auth.basic.sql` | Yes for Basic | — | SQL that selects the owner and password hash. |
 | `auth.basic.owner` | Yes for Basic | — | Selected owner-column name. |
 | `auth.basic.password` | Yes for Basic | — | Selected password-hash column name. |
+| `auth.basic.role` | Required when an endpoint using Basic sets `roles` | — | Selected role-column name. |
 | `auth.bearer.sql` | Yes for Bearer | — | SQL that resolves the owner. |
 | `auth.bearer.owner` | Yes for Bearer | — | Selected owner-column name. |
+| `auth.bearer.role` | Required when an endpoint using Bearer sets `roles` | — | Selected role-column name. |
+
+`roles` cannot be used with `auth_optional = true`. A successfully authenticated caller whose selected role is not allowed receives `403`.
+
+Configured `owner`, `password`, and `role` column names must not be blank.
 
 ## ALTCHA
 
