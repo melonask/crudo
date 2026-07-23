@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use altcha::{Challenge, Payload, SolveChallengeOptions, solve_challenge};
 use axum::{
     body::Body,
     extract::ConnectInfo,
@@ -591,13 +592,20 @@ async fn sqlite_store_demo_lifecycle_enforces_ownership_and_admin_access() {
     let api_pool = connect(&config).await.unwrap();
     prepare_database(&api_pool, &config).await.unwrap();
     let app = build_router(api_pool, config).unwrap();
-    let products = json_response(
-        app.clone()
-            .oneshot(request("GET", "/v1/products", Body::empty()))
-            .await
+    let mut products_request = request("GET", "/v1/products", Body::empty());
+    products_request
+        .headers_mut()
+        .insert(ORIGIN, "https://demo-crudo.github.io".parse().unwrap());
+    let products_response = app.clone().oneshot(products_request).await.unwrap();
+    assert_eq!(products_response.status(), StatusCode::OK);
+    assert_eq!(
+        products_response
+            .headers()
+            .get(ACCESS_CONTROL_ALLOW_ORIGIN)
             .unwrap(),
-    )
-    .await;
+        "https://demo-crudo.github.io"
+    );
+    let products = json_response(products_response).await;
     let products = products.as_array().unwrap();
     assert_eq!(products.len(), 4);
     assert!(
@@ -610,6 +618,45 @@ async fn sqlite_store_demo_lifecycle_enforces_ownership_and_admin_access() {
         .find(|product| product["price"] == 1299)
         .unwrap();
     let product_id = product["id"].as_i64().unwrap();
+
+    assert_eq!(
+        json_response(
+            app.clone()
+                .oneshot(request("GET", "/v1/payment-methods", Body::empty()))
+                .await
+                .unwrap(),
+        )
+        .await,
+        json!([{
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "token_name": "USDC",
+            "token_version": 2,
+            "timeout_seconds": 60,
+        }])
+    );
+
+    let missing_registration_proof = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/v1/users",
+            Body::from(r#"{"name":"Missing","email":"missing@example.test","password":"secret"}"#),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_registration_proof.status(), StatusCode::FORBIDDEN);
+    let missing_login_proof = app
+        .clone()
+        .oneshot(authorized_request(
+            "POST",
+            "/v1/tokens",
+            &format!("Basic {}", BASE64.encode("admin:invalid-password")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_login_proof.status(), StatusCode::FORBIDDEN);
 
     let admin_token = login(&app, "admin", "admin").await;
     assert_eq!(
@@ -799,6 +846,9 @@ fn example_sqlite_config(database_url: &str) -> String {
     include_str!("../config/sqlite.toml")
         .replace("sqlite://crudo-store.db?mode=rwc", database_url)
         .replace("${WALLET_MNEMONIC}", TEST_WALLET_MNEMONIC)
+        .replace("${ALTCHA_SECRET}", "test-altcha-secret")
+        .replace("${ALTCHA_KEY_SECRET}", "test-altcha-key-secret")
+        .replace("cost = 10000", "cost = 1")
 }
 
 fn authorized_json_request(method: &str, uri: &str, token: &str, body: Value) -> Request<Body> {
@@ -816,13 +866,16 @@ async fn json_response(response: axum::response::Response) -> Value {
 async fn register(app: &axum::Router, email: &str) -> String {
     let response = app
         .clone()
-        .oneshot(request(
-            "POST",
-            "/v1/users",
-            Body::from(
-                json!({ "name": "Customer", "email": email, "password": "secret" }).to_string(),
-            ),
-        ))
+        .oneshot(
+            protected_json_request(
+                app,
+                "POST",
+                "/v1/users",
+                None,
+                json!({ "name": "Customer", "email": email, "password": "secret" }),
+            )
+            .await,
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
@@ -833,11 +886,16 @@ async fn login(app: &axum::Router, email: &str, password: &str) -> String {
     let basic = BASE64.encode(format!("{email}:{password}"));
     let response = app
         .clone()
-        .oneshot(authorized_request(
-            "POST",
-            "/v1/tokens",
-            &format!("Basic {basic}"),
-        ))
+        .oneshot(
+            protected_json_request(
+                app,
+                "POST",
+                "/v1/tokens",
+                Some(&format!("Basic {basic}")),
+                json!({}),
+            )
+            .await,
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
@@ -845,6 +903,43 @@ async fn login(app: &axum::Router, email: &str, password: &str) -> String {
         .as_str()
         .unwrap()
         .to_owned()
+}
+
+async fn protected_json_request(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    authorization: Option<&str>,
+    mut body: Value,
+) -> Request<Body> {
+    body["altcha"] = Value::String(altcha_proof(app).await);
+    let mut request = request(method, uri, Body::from(body.to_string()));
+    if let Some(authorization) = authorization {
+        request
+            .headers_mut()
+            .insert(AUTHORIZATION, authorization.parse().unwrap());
+    }
+    request
+}
+
+async fn altcha_proof(app: &axum::Router) -> String {
+    let response = app
+        .clone()
+        .oneshot(request("GET", "/v1/challenge", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let challenge: Challenge = serde_json::from_value(json_response(response).await).unwrap();
+    let solution = solve_challenge(SolveChallengeOptions::new(&challenge))
+        .unwrap()
+        .unwrap();
+    BASE64.encode(
+        serde_json::to_vec(&Payload {
+            challenge,
+            solution,
+        })
+        .unwrap(),
+    )
 }
 
 async fn top_up(app: &axum::Router, token: &str, external_id: &str, amount: i64) {

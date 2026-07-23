@@ -4,13 +4,13 @@ address = "127.0.0.1:3000"
 prefix = "v1"
 
 [server.cors]
-origins = ["http://127.0.0.1:8000", "http://localhost:8000"]
+origins = ["http://127.0.0.1:8000", "http://localhost:8000", "https://demo-crudo.github.io"]
 
 [server.limits]
-body_bytes = 65536
-timeout_seconds = 15
-concurrency = 32
-requests = 60
+body_bytes = 16384
+timeout_seconds = 10
+concurrency = 16
+requests = 30
 window_seconds = 60
 
 [database]
@@ -51,6 +51,16 @@ password = "password"
 sql = "SELECT user_id FROM sessions WHERE token = ? AND expires_at > unixepoch()"
 owner = "user_id"
 
+[altcha]
+secret = "${ALTCHA_SECRET}"
+key_secret = "${ALTCHA_KEY_SECRET}"
+path = "/challenge"
+algorithm = "PBKDF2/SHA-256"
+cost = 10000
+max_number = 10000
+expires_seconds = 300
+bind_ip = true
+
 [wallets]
 mnemonic = "${WALLET_MNEMONIC}"
 
@@ -76,21 +86,23 @@ max_addresses = 1
 method = "POST"
 path = "/users"
 action = "register"
+altcha = true
 
 [endpoints.limits]
 body_bytes = 4096
-requests = 5
-window_seconds = 60
+requests = 3
+window_seconds = 300
 
 [[endpoints]]
 method = "POST"
 path = "/tokens"
 action = "login"
 auth = ["basic"]
+altcha = true
 
 [endpoints.limits]
 body_bytes = 1024
-requests = 10
+requests = 5
 window_seconds = 60
 
 [[endpoints]]
@@ -103,6 +115,11 @@ auth = ["bearer"]
 method = "GET"
 path = "/products"
 action = "list_products"
+
+[[endpoints]]
+method = "GET"
+path = "/payment-methods"
+action = "list_payment_methods"
 
 [[endpoints]]
 method = "GET"
@@ -217,6 +234,10 @@ no_store = true
 
 [actions.list_products]
 sql = "SELECT id, slug, name, description, category, price, active, created_at, updated_at FROM products WHERE active = 1 ORDER BY id"
+result = "many"
+
+[actions.list_payment_methods]
+sql = "SELECT 'exact' AS scheme, network, asset, token_name, token_version, timeout_seconds FROM exact_payment_methods WHERE active = 1 ORDER BY network, asset, token_name, token_version, id"
 result = "many"
 
 [actions.list_transactions]

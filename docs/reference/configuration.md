@@ -54,6 +54,8 @@ sources = [
 | `server.prefix` | No | `""` | Mounted before endpoint and ALTCHA paths. Configured paths must start with `/`. |
 | `server.cors.origins` | No | — | When `[server.cors]` exists, this nonempty string array is required. Allows all methods and `Authorization`/`Content-Type`. |
 
+Configure only exact origins for the deployment. Configuration strings support `${ENV}` expansion, including CORS origins, so deployment-specific values do not require Rust changes.
+
 ## Limits
 
 Server limits apply by default. `[endpoints.limits]` accepts optional versions of every field below and overrides the server value.

@@ -713,6 +713,15 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
         };
         input.extend(object);
     }
+    if route.altcha && route.altcha_for_authenticated {
+        verify_altcha(
+            &state,
+            input
+                .remove("altcha")
+                .and_then(|value| value.as_str().map(str::to_owned)),
+            request.ip,
+        )?;
+    }
     let owner = if route.auth.is_empty()
         || (route.auth_optional && !request.headers.contains_key(AUTHORIZATION))
     {
@@ -720,7 +729,7 @@ async fn run_action(state: Arc<AppState>, request: ActionRequest) -> Result<Resp
     } else {
         Some(authenticate(&state, &route.auth, &request.headers).await?)
     };
-    if route.altcha && (route.altcha_for_authenticated || owner.is_none()) {
+    if route.altcha && !route.altcha_for_authenticated && owner.is_none() {
         verify_altcha(
             &state,
             input

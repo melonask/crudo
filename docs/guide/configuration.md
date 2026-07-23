@@ -22,10 +22,10 @@ There is no escaping or fallback syntax.
 - `[wallets]` is optional.
 - To run without a mnemonic, omit `[wallets]` and every `actions.<name>.wallets` stage.
 - `passphrase` defaults to an empty string.
-- The shipped store configurations configure wallets, but not ALTCHA.
+- The shipped store configurations configure wallets and ALTCHA.
 
 ::: info Conditional feature secrets
-A configuration with wallet stages may require `${WALLET_MNEMONIC}`; one with `[altcha]` requires its configured secrets. Neither is globally required by crudo. Both shipped store configurations require `${WALLET_MNEMONIC}`; `config/postgres.toml` also requires `${DATABASE_URL}`.
+A configuration with wallet stages may require `${WALLET_MNEMONIC}`; one with `[altcha]` requires its configured secrets. Neither is globally required by crudo. Both shipped store configurations require `${WALLET_MNEMONIC}`, `${ALTCHA_SECRET}`, and `${ALTCHA_KEY_SECRET}`; `config/postgres.toml` also requires `${DATABASE_URL}`.
 :::
 
 ## Load remote configuration carefully

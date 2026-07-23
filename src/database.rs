@@ -185,10 +185,13 @@ mod tests {
     }
 
     fn example_config() -> Config {
-        let source = include_str!("../config/sqlite.toml").replace(
-            "${WALLET_MNEMONIC}",
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-        );
+        let source = include_str!("../config/sqlite.toml")
+            .replace("${ALTCHA_SECRET}", "test-secret")
+            .replace("${ALTCHA_KEY_SECRET}", "test-key-secret")
+            .replace(
+                "${WALLET_MNEMONIC}",
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            );
         Config::parse(&source).unwrap()
     }
 

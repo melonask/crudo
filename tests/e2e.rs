@@ -1,5 +1,6 @@
 use std::{env, time::Duration};
 
+use altcha::{Challenge, Payload, SolveChallengeOptions, solve_challenge};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use crudo::{Config, build_router, connect, prepare_database, serve};
 use reqwest::{Client, StatusCode, header::HeaderName};
@@ -38,16 +39,19 @@ impl Backend {
                 );
                 include_str!("../config/sqlite.toml")
                     .replace("sqlite://crudo-store.db?mode=rwc", &database_url)
-                    .replace("requests = 60", "requests = 0")
+                    .replace("requests = 30", "requests = 0")
             }
             Self::Postgres => include_str!("../config/postgres.toml")
                 .replace(
                     "${DATABASE_URL}",
                     &env::var("DATABASE_URL").expect("DATABASE_URL is required for postgres E2E"),
                 )
-                .replace("requests = 60", "requests = 0"),
+                .replace("requests = 30", "requests = 0"),
         }
         .replace("${WALLET_MNEMONIC}", TEST_WALLET_MNEMONIC)
+        .replace("${ALTCHA_SECRET}", "test-altcha-secret")
+        .replace("${ALTCHA_KEY_SECRET}", "test-altcha-key-secret")
+        .replace("cost = 10000", "cost = 1")
     }
 }
 
@@ -215,7 +219,7 @@ async fn assert_seeded_store(pool: &AnyPool) {
 async fn register(client: &Client, base: &str, email: &str) -> i64 {
     let response = client
         .post(format!("{base}/users"))
-        .json(&json!({"name":"Customer","email":email,"password":"secret"}))
+        .json(&json!({"name":"Customer","email":email,"password":"secret","altcha":altcha_proof(client, base).await}))
         .send()
         .await
         .unwrap();
@@ -232,6 +236,7 @@ async fn login(client: &Client, base: &str, email: &str, password: &str) -> Stri
             "authorization",
             format!("Basic {}", BASE64.encode(format!("{email}:{password}"))),
         )
+        .json(&json!({"altcha":altcha_proof(client, base).await}))
         .send()
         .await
         .unwrap();
@@ -240,6 +245,26 @@ async fn login(client: &Client, base: &str, email: &str, password: &str) -> Stri
         .as_str()
         .unwrap()
         .to_owned()
+}
+
+async fn altcha_proof(client: &Client, base: &str) -> String {
+    let response = client
+        .get(format!("{base}/challenge"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let challenge = response.json::<Challenge>().await.unwrap();
+    let solution = solve_challenge(SolveChallengeOptions::new(&challenge))
+        .unwrap()
+        .unwrap();
+    BASE64.encode(
+        serde_json::to_vec(&Payload {
+            challenge,
+            solution,
+        })
+        .unwrap(),
+    )
 }
 
 async fn get(client: &Client, url: &str, token: Option<&str>) -> Value {
