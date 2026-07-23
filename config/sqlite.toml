@@ -1,212 +1,46 @@
-# SQLite development configuration. PostgreSQL users should use `postgres.toml`.
+# Local-only digital-store demo. Do not use the seeded credentials outside a demo.
 [server]
-# Bind to 0.0.0.0 in a container; loopback is safer for local development.
 address = "127.0.0.1:3000"
-# Mounted before every endpoint path, including the ALTCHA challenge path.
 prefix = "v1"
 
 [server.cors]
-# Origins allowed to use the included browser console. Restrict this list in production.
 origins = ["http://127.0.0.1:8000", "http://localhost:8000"]
 
 [server.limits]
-# Maximum decoded request body size in bytes.
-body_bytes = 1048576
-# Per-request wall-clock timeout and simultaneous request ceiling.
-timeout_seconds = 30
-concurrency = 100
-# Requests allowed per direct client IP in each window; 0 disables rate limiting.
-requests = 120
+body_bytes = 65536
+timeout_seconds = 15
+concurrency = 32
+requests = 60
 window_seconds = 60
 
-[altcha]
-path = "/challenge"
-# Required independent ALTCHA secrets are supplied through the environment.
-secret = "${ALTCHA_SECRET}"
-key_secret = "${ALTCHA_KEY_SECRET}"
-algorithm = "PBKDF2/SHA-256"
-cost = 5000
-max_number = 10000
-expires_seconds = 300
-bind_ip = true
-
 [database]
-# mode=rwc opens an existing database or creates it when absent.
-url = "sqlite://crudo.db?mode=rwc"
-# Idempotent setup runs atomically before the server starts.
+# A dedicated filename prevents this demo from opening an incompatible prior schema.
+url = "sqlite://crudo-store.db?mode=rwc"
+# Setup is run in one transaction before serving requests.
 setup = [
-  """
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    email TEXT NOT NULL UNIQUE,
-    password TEXT NOT NULL,
-    balance INTEGER NOT NULL DEFAULT 0
-  )
-  """,
-  """
-  CREATE TABLE IF NOT EXISTS user_addresses (
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    profile TEXT NOT NULL,
-    address_index INTEGER NOT NULL,
-    address TEXT NOT NULL,
-    derivation_path TEXT NOT NULL,
-    PRIMARY KEY (user_id, profile, address_index),
-    UNIQUE (profile, address),
-    UNIQUE (user_id, profile, address)
-  )
-  """,
-  """
-  CREATE TABLE IF NOT EXISTS sessions (
-    token TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    expires_at INTEGER NOT NULL
-  )
-  """,
-  """
-  CREATE TABLE IF NOT EXISTS transactions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    external_id TEXT NOT NULL UNIQUE,
-    user_id INTEGER NOT NULL,
-    profile TEXT NOT NULL,
-    address TEXT NOT NULL,
-    type TEXT NOT NULL,
-    status TEXT NOT NULL,
-    amount INTEGER NOT NULL CHECK (amount > 0),
-    credited_at INTEGER,
-    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-    FOREIGN KEY (user_id, profile, address)
-      REFERENCES user_addresses(user_id, profile, address)
-  )
-  """,
-  """
-  CREATE TRIGGER IF NOT EXISTS credit_confirmed_deposit_insert
-  AFTER INSERT ON transactions
-  WHEN NEW.type = 'deposit'
-    AND NEW.status = 'confirmed'
-    AND NEW.credited_at IS NULL
-  BEGIN
-    UPDATE users
-    SET balance = balance + NEW.amount
-    WHERE id = NEW.user_id;
-
-    SELECT CASE WHEN changes() <> 1
-      THEN RAISE(ABORT, 'deposit user not found')
-    END;
-
-    UPDATE transactions
-    SET credited_at = unixepoch()
-    WHERE id = NEW.id;
-  END
-  """,
-  """
-  CREATE TRIGGER IF NOT EXISTS credit_confirmed_deposit_update
-  AFTER UPDATE OF status ON transactions
-  WHEN NEW.type = 'deposit'
-    AND NEW.status = 'confirmed'
-    AND NEW.credited_at IS NULL
-  BEGIN
-    UPDATE users
-    SET balance = balance + NEW.amount
-    WHERE id = NEW.user_id;
-
-    SELECT CASE WHEN changes() <> 1
-      THEN RAISE(ABORT, 'deposit user not found')
-    END;
-
-    UPDATE transactions
-    SET credited_at = unixepoch()
-    WHERE id = NEW.id;
-  END
-  """,
-  """
-  CREATE TABLE IF NOT EXISTS expenses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    external_id TEXT NOT NULL UNIQUE,
-    user_id INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    amount INTEGER NOT NULL CHECK (amount > 0),
-    description TEXT,
-    debited_at INTEGER,
-    created_at INTEGER NOT NULL DEFAULT (unixepoch())
-  )
-  """,
-  """
-  CREATE TRIGGER IF NOT EXISTS debit_confirmed_expense_insert
-  AFTER INSERT ON expenses
-  WHEN NEW.status = 'confirmed'
-    AND NEW.debited_at IS NULL
-  BEGIN
-    UPDATE users
-    SET balance = balance - NEW.amount
-    WHERE id = NEW.user_id
-      AND balance >= NEW.amount;
-
-    SELECT CASE WHEN changes() <> 1
-      THEN RAISE(ABORT, 'expense user not found or insufficient balance')
-    END;
-
-    UPDATE expenses
-    SET debited_at = unixepoch()
-    WHERE id = NEW.id;
-  END
-  """,
-  """
-  CREATE TRIGGER IF NOT EXISTS debit_confirmed_expense_update
-  AFTER UPDATE OF status ON expenses
-  WHEN NEW.status = 'confirmed'
-    AND NEW.debited_at IS NULL
-  BEGIN
-    UPDATE users
-    SET balance = balance - NEW.amount
-    WHERE id = NEW.user_id
-      AND balance >= NEW.amount;
-
-    SELECT CASE WHEN changes() <> 1
-      THEN RAISE(ABORT, 'expense user not found or insufficient balance')
-    END;
-
-    UPDATE expenses
-    SET debited_at = unixepoch()
-    WHERE id = NEW.id;
-  END
-  """
+  "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL CHECK (name <> ''), email TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (email <> ''), password TEXT NOT NULL CHECK (password <> ''), role TEXT NOT NULL DEFAULT 'customer' CHECK (role IN ('admin', 'customer')), balance INTEGER NOT NULL DEFAULT 0 CHECK (balance >= 0), created_at INTEGER NOT NULL DEFAULT (unixepoch()))",
+  "CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY CHECK (token <> ''), user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL CHECK (expires_at > 0))",
+  "CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, description TEXT NOT NULL, category TEXT NOT NULL CHECK (category IN ('license', 'service', 'book', 'asset')), price INTEGER NOT NULL CHECK (price > 0), active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)), fulfillment TEXT NOT NULL, created_at INTEGER NOT NULL DEFAULT (unixepoch()), updated_at INTEGER NOT NULL DEFAULT (unixepoch()))",
+  "CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, external_id TEXT NOT NULL UNIQUE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT, product_id INTEGER REFERENCES products(id) ON DELETE RESTRICT, kind TEXT NOT NULL CHECK (kind IN ('top_up', 'purchase')), status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed')), amount INTEGER NOT NULL CHECK (amount > 0), product_name TEXT, fulfillment TEXT, license_key TEXT UNIQUE, processed_at INTEGER, created_at INTEGER NOT NULL DEFAULT (unixepoch()), CHECK ((kind = 'top_up' AND product_id IS NULL AND product_name IS NULL AND fulfillment IS NULL AND license_key IS NULL) OR (kind = 'purchase' AND product_id IS NOT NULL AND product_name IS NOT NULL AND fulfillment IS NOT NULL AND license_key IS NOT NULL)))",
+  "CREATE TRIGGER IF NOT EXISTS users_validate_insert BEFORE INSERT ON users WHEN NEW.name IS NULL OR NEW.name = '' OR NEW.email IS NULL OR NEW.email = '' OR NEW.password IS NULL OR NEW.password = '' BEGIN SELECT RAISE(ABORT, 'invalid user'); END",
+  "CREATE TRIGGER IF NOT EXISTS products_validate_insert BEFORE INSERT ON products WHEN NEW.slug = '' OR NEW.name = '' OR NEW.description = '' OR NEW.fulfillment = '' OR NEW.category NOT IN ('license', 'service', 'book', 'asset') OR NEW.price <= 0 OR NEW.active NOT IN (0, 1) BEGIN SELECT RAISE(ABORT, 'invalid product'); END",
+  "CREATE TRIGGER IF NOT EXISTS products_validate_update BEFORE UPDATE ON products WHEN NEW.slug = '' OR NEW.name = '' OR NEW.description = '' OR NEW.fulfillment = '' OR NEW.category NOT IN ('license', 'service', 'book', 'asset') OR NEW.price <= 0 OR NEW.active NOT IN (0, 1) BEGIN SELECT RAISE(ABORT, 'invalid product'); END",
+  "CREATE TRIGGER IF NOT EXISTS transactions_validate_insert BEFORE INSERT ON transactions WHEN NEW.external_id IS NULL OR NEW.external_id = '' BEGIN SELECT RAISE(ABORT, 'external id must not be empty'); END",
+  "CREATE TRIGGER IF NOT EXISTS transactions_validate_amount_insert BEFORE INSERT ON transactions WHEN NEW.amount IS NULL OR NEW.amount <= 0 BEGIN SELECT RAISE(ABORT, 'amount must be positive'); END",
+  "CREATE TRIGGER IF NOT EXISTS credit_confirmed_top_up_insert AFTER INSERT ON transactions WHEN NEW.kind = 'top_up' AND NEW.status = 'confirmed' AND NEW.processed_at IS NULL BEGIN UPDATE users SET balance = balance + NEW.amount WHERE id = NEW.user_id; SELECT CASE WHEN changes() <> 1 THEN RAISE(ABORT, 'top-up user not found') END; UPDATE transactions SET processed_at = unixepoch() WHERE id = NEW.id; END",
+  "CREATE TRIGGER IF NOT EXISTS credit_confirmed_top_up_update AFTER UPDATE OF status ON transactions WHEN NEW.kind = 'top_up' AND NEW.status = 'confirmed' AND NEW.processed_at IS NULL BEGIN UPDATE users SET balance = balance + NEW.amount WHERE id = NEW.user_id; SELECT CASE WHEN changes() <> 1 THEN RAISE(ABORT, 'top-up user not found') END; UPDATE transactions SET processed_at = unixepoch() WHERE id = NEW.id; END",
+  "CREATE TRIGGER IF NOT EXISTS debit_confirmed_purchase_insert AFTER INSERT ON transactions WHEN NEW.kind = 'purchase' AND NEW.status = 'confirmed' AND NEW.processed_at IS NULL BEGIN UPDATE users SET balance = balance - NEW.amount WHERE id = NEW.user_id AND balance >= NEW.amount; SELECT CASE WHEN changes() <> 1 THEN RAISE(ABORT, 'insufficient balance') END; UPDATE transactions SET processed_at = unixepoch() WHERE id = NEW.id; END",
+  "CREATE TRIGGER IF NOT EXISTS debit_confirmed_purchase_update AFTER UPDATE OF status ON transactions WHEN NEW.kind = 'purchase' AND NEW.status = 'confirmed' AND NEW.processed_at IS NULL BEGIN UPDATE users SET balance = balance - NEW.amount WHERE id = NEW.user_id AND balance >= NEW.amount; SELECT CASE WHEN changes() <> 1 THEN RAISE(ABORT, 'insufficient balance') END; UPDATE transactions SET processed_at = unixepoch() WHERE id = NEW.id; END",
+  "CREATE TRIGGER IF NOT EXISTS transactions_preserve_history BEFORE UPDATE ON transactions WHEN OLD.processed_at IS NOT NULL AND (NEW.external_id IS NOT OLD.external_id OR NEW.user_id IS NOT OLD.user_id OR NEW.product_id IS NOT OLD.product_id OR NEW.kind IS NOT OLD.kind OR NEW.status IS NOT OLD.status OR NEW.amount IS NOT OLD.amount OR NEW.product_name IS NOT OLD.product_name OR NEW.fulfillment IS NOT OLD.fulfillment OR NEW.license_key IS NOT OLD.license_key OR NEW.processed_at IS NOT OLD.processed_at OR NEW.created_at IS NOT OLD.created_at) BEGIN SELECT RAISE(ABORT, 'processed transaction is immutable'); END",
+  "INSERT INTO users (name, email, password, role) VALUES ('Demo Administrator', 'admin', '$argon2id$v=19$m=19456,t=2,p=1$Ed856bd8JquN3O8a8YbBkQ$9KebavABf/1aW97pVn+LTRTeY4KFIhffpLrJxDa5xcw', 'admin') ON CONFLICT(email) DO NOTHING",
+  "INSERT INTO products (slug, name, description, category, price, fulfillment) VALUES ('macos-pro-access-code', 'macOS Pro Access Code', 'Single-user access code for the macOS Pro edition.', 'license', 4999, 'Your access code is displayed in this purchase record. Redeem it in the macOS Pro application under Account > Redeem Code.') ON CONFLICT(slug) DO NOTHING",
+  "INSERT INTO products (slug, name, description, category, price, fulfillment) VALUES ('background-removal', 'Studio Background Removal', 'One high-resolution image processed with careful edge handling.', 'service', 1299, 'Upload your source image through the store support channel and include this purchase ID. Delivery is provided as a transparent PNG.') ON CONFLICT(slug) DO NOTHING",
+  "INSERT INTO products (slug, name, description, category, price, fulfillment) VALUES ('practical-product-design', 'Practical Product Design', 'A digital book on planning, shipping, and maintaining small software products.', 'book', 1899, 'Your purchase record includes your personal reading access code and download instructions.') ON CONFLICT(slug) DO NOTHING",
+  "INSERT INTO products (slug, name, description, category, price, fulfillment) VALUES ('architectural-planter-3d', 'Architectural Planter 3D Model', 'Production-ready low-poly planter asset with organized materials.', 'asset', 2499, 'Your purchase record includes the asset retrieval instructions and license key.') ON CONFLICT(slug) DO NOTHING"
 ]
 
-[wallets]
-mnemonic = "${WALLET_MNEMONIC}"
-
-[[wallets.profiles]]
-name = "ethereum-mainnet"
-caip2 = "eip155:1"
-curve = "secp256k1"
-derivation = "bip32"
-path = "m/44'/60'/{user_id}'/0/{address_index}"
-address_format = "evm"
-max_addresses = 5
-
-[[wallets.profiles]]
-name = "solana-mainnet"
-caip2 = "solana:4sGjMW1sUnHzSxGspuhpqLDx6wiyjNtZ"
-curve = "ed25519"
-derivation = "slip10"
-path = "m/44'/501'/{user_id}'/{address_index}'"
-address_format = "base58-public-key"
-max_addresses = 5
-
-[[wallets.profiles]]
-name = "bitcoin-mainnet"
-caip2 = "bip122:000000000019d6689c085ae165831e93"
-curve = "secp256k1"
-derivation = "bip32"
-path = "m/84'/0'/{user_id}'/0/{address_index}"
-address_format = "p2wpkh"
-network = "mainnet"
-max_addresses = 5
-
 [auth.basic]
-# SQLite uses `?` positional placeholders and unixepoch() for Unix timestamps.
-sql = "SELECT id, password FROM users WHERE email = ?"
+sql = "SELECT id, password FROM users WHERE email = ? COLLATE NOCASE"
 owner = "id"
 password = "password"
 
@@ -217,30 +51,34 @@ owner = "user_id"
 [[endpoints]]
 method = "POST"
 path = "/users"
-action = "create_user"
-altcha = true
+action = "register"
 
-[[endpoints]]
-method = "GET"
-path = "/users"
-action = "list_users"
-
-[[endpoints]]
-method = "GET"
-path = "/users/{id}"
-action = "get_user"
+[endpoints.limits]
+body_bytes = 4096
+requests = 5
+window_seconds = 60
 
 [[endpoints]]
 method = "POST"
 path = "/tokens"
-action = "create_token"
+action = "login"
 auth = ["basic"]
 
+[endpoints.limits]
+body_bytes = 1024
+requests = 10
+window_seconds = 60
+
 [[endpoints]]
-method = "DELETE"
-path = "/users/{id}"
-action = "delete_user"
-auth = ["basic", "bearer"]
+method = "GET"
+path = "/me"
+action = "me"
+auth = ["bearer"]
+
+[[endpoints]]
+method = "GET"
+path = "/products"
+action = "list_products"
 
 [[endpoints]]
 method = "GET"
@@ -249,115 +87,206 @@ action = "list_transactions"
 auth = ["bearer"]
 
 [[endpoints]]
+method = "POST"
+path = "/top-ups"
+action = "create_top_up"
+auth = ["bearer"]
+
+[endpoints.limits]
+body_bytes = 2048
+requests = 10
+window_seconds = 60
+
+[[endpoints]]
+method = "POST"
+path = "/purchases"
+action = "create_purchase"
+auth = ["bearer"]
+
+[endpoints.limits]
+body_bytes = 2048
+requests = 10
+window_seconds = 60
+
+[[endpoints]]
 method = "GET"
-path = "/addresses"
-action = "list_addresses"
-auth = ["bearer"]
-
-[[endpoints]]
-method = "POST"
-path = "/addresses"
-action = "create_address"
-auth = ["bearer"]
-
-[[endpoints]]
-method = "POST"
-path = "/transactions"
-action = "create_deposit"
+path = "/admin/summary"
+action = "admin_summary"
 auth = ["bearer"]
 
 [[endpoints]]
 method = "GET"
-path = "/expenses"
-action = "list_expenses"
+path = "/admin/users"
+action = "admin_users"
+auth = ["bearer"]
+
+[[endpoints]]
+method = "GET"
+path = "/admin/transactions"
+action = "admin_transactions"
+auth = ["bearer"]
+
+[[endpoints]]
+method = "GET"
+path = "/admin/users/{id}/transactions"
+action = "admin_user_transactions"
+auth = ["bearer"]
+
+[[endpoints]]
+method = "GET"
+path = "/admin/products"
+action = "admin_products"
 auth = ["bearer"]
 
 [[endpoints]]
 method = "POST"
-path = "/expenses"
-action = "create_expense"
+path = "/admin/products"
+action = "admin_create_product"
 auth = ["bearer"]
 
-[actions.create_user]
-sql = "INSERT INTO users (name, email, password) VALUES (?, ?, ?) RETURNING id, name, email"
+[[endpoints]]
+method = "PUT"
+path = "/admin/products/{id}"
+action = "admin_update_product"
+auth = ["bearer"]
+
+[[endpoints]]
+method = "PUT"
+path = "/admin/products/{id}/status"
+action = "admin_update_product_status"
+auth = ["bearer"]
+
+[actions.register]
+sql = "INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, 'customer') RETURNING id, name, email, role, balance, created_at"
 params = ["name", "email", "password"]
 hash = ["password"]
 result = "one"
 status = 201
+no_store = true
 
-[actions.create_user.wallets]
-profiles = ["ethereum-mainnet", "solana-mainnet", "bitcoin-mainnet"]
-sql = "INSERT INTO user_addresses (user_id, profile, address_index, address, derivation_path) VALUES (?, ?, 0, ?, ?)"
-params = ["$result.id", "$profile.name", "$wallet.address", "$wallet.derivation_path"]
+[[actions.register.errors]]
+database_message = "invalid user"
+status = 422
+message = "name, email, and password must not be empty"
 
-[actions.create_user.wallets.values]
-user_id = "$result.id"
-address_index = "0"
-
-[actions.list_users]
-sql = "SELECT id, name, email, balance FROM users ORDER BY id"
-result = "many"
-
-[actions.get_user]
-sql = "SELECT id, name, email, balance FROM users WHERE id = ?"
-params = ["id"]
-result = "one"
-
-[actions.create_token]
-sql = "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, unixepoch() + 86400) RETURNING token"
+[actions.login]
+sql = "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, unixepoch() + 86400) RETURNING token, expires_at"
 params = ["$token", "$owner"]
 result = "one"
 status = 201
 no_store = true
 
-[actions.delete_user]
-sql = "DELETE FROM users WHERE id = ? AND id = ? RETURNING id, name, email"
-params = ["id", "$owner"]
-result = "optional"
+[actions.me]
+sql = "SELECT id, name, email, role, balance, created_at FROM users WHERE id = ?"
+params = ["$owner"]
+result = "one"
+no_store = true
+
+[actions.list_products]
+sql = "SELECT id, slug, name, description, category, price, active, created_at, updated_at FROM products WHERE active = 1 ORDER BY id"
+result = "many"
 
 [actions.list_transactions]
-sql = "SELECT id, external_id, profile, address, type, status, amount, credited_at, created_at FROM transactions WHERE user_id = ? ORDER BY id DESC"
+sql = "SELECT id, external_id, product_id, kind, status, amount, product_name, fulfillment, license_key, processed_at, created_at FROM transactions WHERE user_id = ? ORDER BY id DESC"
 params = ["$owner"]
 result = "many"
+no_store = true
 
-[actions.list_addresses]
-sql = "SELECT profile, address_index, address, derivation_path FROM user_addresses WHERE user_id = ? ORDER BY profile, address_index"
-params = ["$owner"]
-result = "many"
-
-[actions.create_address]
-sql = "INSERT INTO user_addresses (user_id, profile, address_index, address, derivation_path) SELECT ?, ?, CASE WHEN COUNT(*) < ? THEN COALESCE(MAX(address_index) + 1, 0) ELSE 0 END, ?, '' FROM user_addresses WHERE user_id = ? AND profile = ? RETURNING user_id, profile, address_index"
-params = ["$owner", "$profile.name", "$profile.max_addresses", "$token", "$owner", "$profile.name"]
+[actions.create_top_up]
+# Demo credit only: this endpoint performs no payment-provider verification.
+sql = "INSERT INTO transactions (external_id, user_id, kind, status, amount) VALUES (?, ?, 'top_up', 'confirmed', ?) RETURNING id, external_id, kind, status, amount, processed_at, created_at"
+params = ["external_id", "$owner", "amount"]
 result = "one"
 status = 201
+no_store = true
 
-[actions.create_address.wallets]
-profile = "profile"
-sql = "UPDATE user_addresses SET address = ?, derivation_path = ? WHERE user_id = ? AND profile = ? AND address_index = ?"
-params = ["$wallet.address", "$wallet.derivation_path", "$result.user_id", "$profile.name", "$result.address_index"]
+[[actions.create_top_up.errors]]
+database_message = "amount must be positive"
+status = 422
+message = "amount must be positive"
 
-[actions.create_address.wallets.values]
-user_id = "$result.user_id"
-address_index = "$result.address_index"
+[[actions.create_top_up.errors]]
+database_message = "external id must not be empty"
+status = 422
+message = "external_id must not be empty"
 
-[actions.create_deposit]
-sql = "INSERT INTO transactions (external_id, user_id, profile, address, type, status, amount) VALUES (?, ?, ?, ?, 'deposit', 'confirmed', ?) RETURNING id, external_id, profile, address, type, status, amount, credited_at, created_at"
-params = ["external_id", "$owner", "profile", "address", "amount"]
+[actions.create_purchase]
+sql = "INSERT INTO transactions (external_id, user_id, product_id, kind, status, amount, product_name, fulfillment, license_key) SELECT ?, ?, p.id, 'purchase', 'confirmed', p.price, p.name, p.fulfillment, ? FROM products AS p WHERE p.id = ? AND p.active = 1 RETURNING id, external_id, product_id, kind, status, amount, product_name, fulfillment, license_key, processed_at, created_at"
+params = ["external_id", "$owner", "$token", "product_id"]
 result = "one"
 status = 201
+no_store = true
 
-[actions.list_expenses]
-sql = "SELECT id, external_id, status, amount, description, debited_at, created_at FROM expenses WHERE user_id = ? ORDER BY id DESC"
-params = ["$owner"]
-result = "many"
-
-[actions.create_expense]
-sql = "INSERT INTO expenses (external_id, user_id, status, amount, description) VALUES (?, ?, 'confirmed', ?, ?) RETURNING id, external_id, status, amount, description, debited_at, created_at"
-params = ["external_id", "$owner", "amount", "description"]
-result = "one"
-status = 201
-
-[[actions.create_expense.errors]]
-database_message = "expense user not found or insufficient balance"
+[[actions.create_purchase.errors]]
+database_message = "insufficient balance"
 status = 422
 message = "insufficient balance"
+
+[[actions.create_purchase.errors]]
+database_message = "external id must not be empty"
+status = 422
+message = "external_id must not be empty"
+
+[actions.admin_summary]
+sql = "SELECT u.balance AS user_count, u.balance AS customer_count, u.balance AS product_count, u.balance AS transaction_count, u.balance AS total_balances, u.balance AS total_topups, u.balance AS total_sales FROM users AS u WHERE 0 UNION ALL SELECT (SELECT COUNT(*) FROM users), (SELECT COUNT(*) FROM users WHERE role = 'customer'), (SELECT COUNT(*) FROM products), (SELECT COUNT(*) FROM transactions), (SELECT COALESCE(SUM(balance), 0) FROM users), (SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE kind = 'top_up' AND status = 'confirmed'), (SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE kind = 'purchase' AND status = 'confirmed') WHERE EXISTS (SELECT 1 FROM users WHERE id = ? AND role = 'admin')"
+params = ["$owner"]
+result = "optional"
+no_store = true
+
+[actions.admin_users]
+sql = "SELECT id, name, email, role, balance, created_at FROM users WHERE EXISTS (SELECT 1 FROM users WHERE id = ? AND role = 'admin') ORDER BY id"
+params = ["$owner"]
+result = "many"
+no_store = true
+
+[actions.admin_transactions]
+sql = "SELECT t.id, t.external_id, t.user_id, u.name AS user_name, u.email AS user_email, t.product_id, t.kind, t.status, t.amount, t.product_name, t.fulfillment, t.license_key, t.processed_at, t.created_at FROM transactions AS t JOIN users AS u ON u.id = t.user_id WHERE EXISTS (SELECT 1 FROM users WHERE id = ? AND role = 'admin') ORDER BY t.id DESC"
+params = ["$owner"]
+result = "many"
+no_store = true
+
+[actions.admin_user_transactions]
+sql = "SELECT t.id, t.external_id, t.user_id, u.name AS user_name, u.email AS user_email, t.product_id, t.kind, t.status, t.amount, t.product_name, t.fulfillment, t.license_key, t.processed_at, t.created_at FROM transactions AS t JOIN users AS u ON u.id = t.user_id WHERE t.user_id = ? AND EXISTS (SELECT 1 FROM users WHERE id = ? AND role = 'admin') ORDER BY t.id DESC"
+params = ["id", "$owner"]
+result = "many"
+no_store = true
+
+[actions.admin_products]
+sql = "SELECT id, slug, name, description, category, price, active, fulfillment, created_at, updated_at FROM products WHERE EXISTS (SELECT 1 FROM users WHERE id = ? AND role = 'admin') ORDER BY id"
+params = ["$owner"]
+result = "many"
+no_store = true
+
+[actions.admin_create_product]
+sql = "INSERT INTO products (slug, name, description, category, price, fulfillment) SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM users WHERE id = ? AND role = 'admin') RETURNING id, slug, name, description, category, price, active, fulfillment, created_at, updated_at"
+params = ["slug", "name", "description", "category", "price", "fulfillment", "$owner"]
+result = "optional"
+status = 201
+no_store = true
+
+[[actions.admin_create_product.errors]]
+database_message = "invalid product"
+status = 422
+message = "invalid product"
+
+[actions.admin_update_product]
+sql = "UPDATE products SET slug = ?, name = ?, description = ?, category = ?, price = ?, fulfillment = ?, updated_at = unixepoch() WHERE id = ? AND EXISTS (SELECT 1 FROM users WHERE id = ? AND role = 'admin') RETURNING id, slug, name, description, category, price, active, fulfillment, created_at, updated_at"
+params = ["slug", "name", "description", "category", "price", "fulfillment", "id", "$owner"]
+result = "optional"
+no_store = true
+
+[[actions.admin_update_product.errors]]
+database_message = "invalid product"
+status = 422
+message = "invalid product"
+
+[actions.admin_update_product_status]
+sql = "UPDATE products SET active = ?, updated_at = unixepoch() WHERE id = ? AND EXISTS (SELECT 1 FROM users WHERE id = ? AND role = 'admin') RETURNING id, slug, name, description, category, price, active, fulfillment, created_at, updated_at"
+params = ["active", "id", "$owner"]
+result = "optional"
+no_store = true
+
+[[actions.admin_update_product_status.errors]]
+database_message = "invalid product"
+status = 422
+message = "invalid product"

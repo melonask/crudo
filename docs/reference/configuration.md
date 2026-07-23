@@ -2,6 +2,10 @@
 
 All fields are TOML fields. Unlisted defaults are not inferred.
 
+## Configuration selection
+
+The CLI uses `--config` to select a local path or HTTPS URL. Without it, it reads `./Crudo.toml`. If neither is available, startup fails with guidance. An unreadable or malformed selected configuration also fails startup. Installed binaries do not require a repository-relative `config/sqlite.toml`; it is a source-tree store bootstrap.
+
 ::: danger Strict schema validation
 All static configuration tables reject unknown fields. A misspelled protection, limit, endpoint, action, authentication, ALTCHA, or wallet field fails startup rather than silently using a default.
 
@@ -12,8 +16,10 @@ Dynamic action names and wallet `values` keys remain user-defined map keys.
 
 | Field | Required | Default | Validation / behavior |
 |---|---|---|---|
-| `database.url` | Yes | — | SQLx SQLite or PostgreSQL connection URL. |
+| `database.url` | No | `sqlite://crudo.db?mode=rwc` | SQLx SQLite or PostgreSQL connection URL. |
 | `database.setup` | No | `[]` | Statements run atomically before serving. |
+
+Omitting `[database]` selects the local SQLite URL above and runs no setup statements. It does not create application tables; define `database.setup` or manage the schema separately when routes need tables.
 
 ## Server and CORS
 

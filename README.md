@@ -12,15 +12,9 @@ Configuration-driven JSON APIs backed by SQL: declare routes, authentication, pr
 
 ```sh
 cargo install crudo
-crudo
-# Optional: in another terminal
-curl http://127.0.0.1:3000/v1/health
 ```
 
-The starter:
-
-- Writes `crudo.db` in the current writable directory.
-- Listens on loopback for the native CLI.
+Create `./Crudo.toml`:
 
 ```toml
 [[endpoints]]
@@ -33,18 +27,16 @@ sql = "SELECT 'ok' AS status"
 result = "one"
 ```
 
-## Included protections
+```sh
+crudo
+curl http://127.0.0.1:3000/health
+```
 
-Configure these protections as needed:
+This configuration uses local `sqlite://crudo.db?mode=rwc`, `127.0.0.1:3000`, and no prefix, so its endpoint is exactly `/health`. See the [full documentation](https://melonask.github.io/crudo/) for configuration and operations.
 
-- Parameter binding and Argon2 password hashing
-- Basic/Bearer authentication and ALTCHA
-- CORS, body, timeout, concurrency, and per-IP limits
-- Transactional schema and wallet stages
+## Optional store demo
 
-The full SQLite/PostgreSQL demos include wallet stages. `WALLET_MNEMONIC` is **not** globally required: `[wallets]` is optional, but `${WALLET_MNEMONIC}` makes it required for those full-demo files. Omit `[wallets]` and wallet stages to run without it.
-
-See the [full documentation](https://melonask.github.io/crudo/) for configuration, Docker, operations, wallet profiles, and API examples.
+The source tree includes SQLite and PostgreSQL digital-store configurations. Use the [live store demo](https://demo-crudo.github.io/) with its visible API URL field (default: `http://127.0.0.1:3000/v1`), or start with the [SQLite](https://melonask.github.io/crudo/examples/sqlite) or [PostgreSQL](https://melonask.github.io/crudo/examples/postgresql) guides. They are development bootstraps, not payment processing or deployment templates.
 
 ## License
 

@@ -104,14 +104,8 @@ mod tests {
     }
 
     fn example_config() -> Config {
-        let source = include_str!("../config/sqlite.toml")
-            .replace(
-                "${WALLET_MNEMONIC}",
-                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-            )
-            .replace("${ALTCHA_SECRET}", "database-test-altcha-secret")
-            .replace("${ALTCHA_KEY_SECRET}", "database-test-altcha-key-secret");
-        Config::parse(&source).unwrap()
+        let source = include_str!("../config/sqlite.toml");
+        Config::parse(source).unwrap()
     }
 
     #[tokio::test]
@@ -164,24 +158,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn database_setup_can_run_repeatedly() {
-        let config = Config::parse(
-            r#"
-            [database]
-            url = "sqlite::memory:"
-            setup = ["CREATE TABLE IF NOT EXISTS ready (id INTEGER PRIMARY KEY)"]
-            "#,
-        )
-        .unwrap();
+    async fn store_setup_is_idempotent_and_seeds_the_demo_catalog() {
+        let config = example_config();
         let pool = memory_pool().await;
 
         prepare_database(&pool, &config).await.unwrap();
         prepare_database(&pool, &config).await.unwrap();
 
-        sqlx::query("INSERT INTO ready (id) VALUES (1)")
-            .execute(&pool)
+        let admin_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM users WHERE email = 'admin' AND role = 'admin'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let product_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM products")
+            .fetch_one(&pool)
             .await
             .unwrap();
+        assert_eq!(admin_count, 1);
+        assert_eq!(product_count, 4);
     }
 
     #[test]
@@ -194,128 +189,5 @@ mod tests {
         };
 
         assert_eq!(error.to_string(), "integer is too large");
-    }
-
-    #[tokio::test]
-    async fn configured_deposit_triggers_credit_exactly_once() {
-        let config = example_config();
-        let pool = memory_pool().await;
-        prepare_database(&pool, &config).await.unwrap();
-        sqlx::query("INSERT INTO users (name, email, password) VALUES (?, ?, ?)")
-            .bind("Owner")
-            .bind("owner@example.com")
-            .bind("unused")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO user_addresses (user_id, profile, address_index, address, derivation_path) \
-             VALUES (?, ?, 0, ?, ?)",
-        )
-        .bind(1_i64)
-        .bind("test")
-        .bind("address-1")
-        .bind("m/0")
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            "INSERT INTO transactions \
-             (external_id, user_id, profile, address, type, status, amount) \
-             VALUES (?, ?, 'test', 'address-1', 'deposit', 'confirmed', ?)",
-        )
-        .bind("deposit-1")
-        .bind(1_i64)
-        .bind(500_i64)
-        .execute(&pool)
-        .await
-        .unwrap();
-        assert_eq!(balance(&pool).await, 500);
-        let credited_at: Option<i64> =
-            sqlx::query_scalar("SELECT credited_at FROM transactions WHERE external_id = ?")
-                .bind("deposit-1")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert!(credited_at.is_some());
-
-        let duplicate = sqlx::query(
-            "INSERT INTO transactions \
-             (external_id, user_id, profile, address, type, status, amount) \
-             VALUES (?, ?, 'test', 'address-1', 'deposit', 'confirmed', ?)",
-        )
-        .bind("deposit-1")
-        .bind(1_i64)
-        .bind(500_i64)
-        .execute(&pool)
-        .await;
-        assert!(duplicate.is_err());
-        assert_eq!(balance(&pool).await, 500);
-
-        sqlx::query(
-            "INSERT INTO transactions \
-             (external_id, user_id, profile, address, type, status, amount) \
-             VALUES (?, ?, 'test', 'address-1', 'deposit', 'pending', ?)",
-        )
-        .bind("deposit-2")
-        .bind(1_i64)
-        .bind(250_i64)
-        .execute(&pool)
-        .await
-        .unwrap();
-        assert_eq!(balance(&pool).await, 500);
-
-        sqlx::query("UPDATE transactions SET status = 'confirmed' WHERE external_id = ?")
-            .bind("deposit-2")
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert_eq!(balance(&pool).await, 750);
-
-        sqlx::query("UPDATE transactions SET status = 'pending' WHERE external_id = ?")
-            .bind("deposit-2")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE transactions SET status = 'confirmed' WHERE external_id = ?")
-            .bind("deposit-2")
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert_eq!(balance(&pool).await, 750);
-    }
-
-    #[tokio::test]
-    async fn configured_deposit_trigger_rolls_back_unknown_user() {
-        let config = example_config();
-        let pool = memory_pool().await;
-        prepare_database(&pool, &config).await.unwrap();
-
-        let result = sqlx::query(
-            "INSERT INTO transactions \
-             (external_id, user_id, profile, address, type, status, amount) \
-             VALUES (?, ?, 'test', 'missing', 'deposit', 'confirmed', ?)",
-        )
-        .bind("unknown-user")
-        .bind(999_i64)
-        .bind(500_i64)
-        .execute(&pool)
-        .await;
-        assert!(result.is_err());
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM transactions WHERE external_id = 'unknown-user'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(count, 0);
-    }
-
-    async fn balance(pool: &AnyPool) -> i64 {
-        sqlx::query_scalar("SELECT balance FROM users WHERE id = 1")
-            .fetch_one(pool)
-            .await
-            .unwrap()
     }
 }

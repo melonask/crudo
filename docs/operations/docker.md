@@ -4,16 +4,16 @@
 
 The runtime image runs as an unprivileged user, listens on port `3000`, and ships its minimal configuration at `/etc/crudo/config.toml`.
 
-## Starter container
+## Minimal API container
 
-The default SQLite API needs no environment variables.
+The image explicitly runs the packaged `config/minimal.toml`, which configures `prefix = "v1"` and needs no environment variables.
 
 ```sh
 docker run --rm -p 3000:3000 ghcr.io/melonask/crudo:latest
 curl http://127.0.0.1:3000/v1/health
 ```
 
-## PostgreSQL wallet demo
+## PostgreSQL store demo
 
 Create a network and start PostgreSQL:
 
@@ -26,20 +26,18 @@ docker run -d --name pg --network crudo \
   postgres:18.4-alpine3.24
 ```
 
-Run the demo with its mounted configuration and required expansions:
+The image defaults to `minimal.toml`; it does not package the store configurations as its default. Mount the store configuration explicitly. `config/postgres.toml` requires only `DATABASE_URL` and explicitly configures `prefix = "v1"`.
 
 ```sh
 docker run --rm -p 3000:3000 --network crudo \
-  -e DATABASE_URL='postgres://crudo:replace-me@pg:5432/crudo' \
-  -e WALLET_MNEMONIC \
-  -e ALTCHA_SECRET \
-  -e ALTCHA_KEY_SECRET \
+  -e DATABASE_URL \
   -v "$PWD/config/postgres.toml:/etc/crudo/config.toml:ro" \
   ghcr.io/melonask/crudo:latest
 ```
 
 ## Production checklist
 
-- Use a secret manager rather than command history for the mnemonic, database URL, and ALTCHA secrets.
-- No `WALLET_PASSPHRASE` is needed unless the mounted configuration references it.
-- To avoid wallet variables, mount a configuration without `[wallets]` or wallet action stages.
+- Provide `DATABASE_URL` through the shell environment or a secret manager; do not put credentials in the command line.
+- To run the SQLite store bootstrap, mount `config/sqlite.toml` explicitly and persist its working directory for `crudo-store.db`.
+- The mounted store bootstraps seed demo-only `admin` / `admin` and self-service demo credit; change or remove the account and do not expose top-ups.
+- Wallet and ALTCHA environment variables are required only by a separately configured wallet or ALTCHA feature.

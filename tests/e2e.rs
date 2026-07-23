@@ -1,11 +1,10 @@
 use std::{env, time::Duration};
 
-use altcha::{Challenge, Payload, SolveChallengeOptions, solve_challenge};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use crudo::{Config, build_router, connect, prepare_database, serve};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
-use sqlx::{AnyPool, AssertSqlSafe, Row};
+use sqlx::AnyPool;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Backend {
@@ -23,330 +22,182 @@ impl Backend {
     }
 
     fn config(self) -> String {
-        let source = match self {
-            Self::Sqlite => include_str!("../config/sqlite.toml"),
-            Self::Postgres => include_str!("../config/postgres.toml"),
-        };
-        let source = source
-            .replace(
-                "sqlite://crudo.db?mode=rwc",
-                &env::var("DATABASE_URL").unwrap(),
-            )
-            .replace("algorithm = \"PBKDF2/SHA-256\"", "algorithm = \"SHA-256\"")
-            .replace("cost = 5000", "cost = 1")
-            .replace("max_number = 10000", "max_number = 1")
-            .replace("requests = 120", "requests = 0")
-            .replace(
-                "${WALLET_MNEMONIC}",
-                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-            );
-        let placeholder = if self == Self::Sqlite { "?" } else { "$1" };
-        format!(
-            r#"{source}
-
-[[endpoints]]
-method = "POST"
-path = "/limited"
-action = "limited"
-
-[endpoints.limits]
-body_bytes = 64
-requests = 2
-window_seconds = 60
-
-[actions.limited]
-sql = "SELECT {placeholder} AS value"
-params = ["value"]
-result = "one"
-"#
-        )
+        match self {
+            Self::Sqlite => {
+                let database_url = format!(
+                    "sqlite:///tmp/crudo-e2e-{}-{}.db?mode=rwc",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                );
+                include_str!("../config/sqlite.toml")
+                    .replace("sqlite://crudo-store.db?mode=rwc", &database_url)
+                    .replace("requests = 60", "requests = 0")
+            }
+            Self::Postgres => include_str!("../config/postgres.toml")
+                .replace(
+                    "${DATABASE_URL}",
+                    &env::var("DATABASE_URL").expect("DATABASE_URL is required for postgres E2E"),
+                )
+                .replace("requests = 60", "requests = 0"),
+        }
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "run with docker compose run --build --rm e2e-sqlite or e2e-postgres"]
-async fn real_http_financial_lifecycle() {
+async fn real_http_store_lifecycle() {
     let backend = Backend::from_env();
     let config = Config::parse(&backend.config()).unwrap();
     let pool = connect(&config).await.unwrap();
     prepare_database(&pool, &config).await.unwrap();
-    reset_database(&pool, backend).await;
+    reset_store(&pool).await;
+    prepare_database(&pool, &config).await.unwrap();
+    prepare_database(&pool, &config).await.unwrap();
+    assert_seeded_store(&pool).await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let app = build_router(pool.clone(), config).unwrap();
-    let server = tokio::spawn(serve(listener, app));
+    let server = tokio::spawn(serve(listener, build_router(pool, config).unwrap()));
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .unwrap();
     let base = format!("http://{address}/v1");
+    let suffix = format!(
+        "{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
 
-    assert_limits(&client, &base).await;
-    let user_ids = register_users_and_verify_altcha(&client, &base).await;
-    assert_assigned_addresses(&pool, backend, &user_ids).await;
-    assert_insufficient_balance_response(&client, &base, &pool, backend, user_ids[0]).await;
-    assert_deposits_require_assigned_addresses(&client, &base, &pool, backend, user_ids[0]).await;
-    exercise_financial_triggers(&pool, backend, &user_ids).await;
+    let admin = login(&client, &base, "admin", "admin").await;
+    assert_eq!(me(&client, &base, &admin).await["role"], "admin");
+    let products = get(&client, &format!("{base}/products"), None).await;
+    let products = products.as_array().unwrap();
+    assert_eq!(products.len(), 4);
+    assert!(
+        products
+            .iter()
+            .all(|product| product.get("fulfillment").is_none())
+    );
+    let service = products
+        .iter()
+        .find(|product| product["price"] == 1299)
+        .unwrap();
+    let service_id = service["id"].as_i64().unwrap();
+    let expensive_id = products
+        .iter()
+        .find(|product| product["price"] == 4999)
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
 
-    for user_id in user_ids {
-        let response = client
-            .get(format!("{base}/users/{user_id}"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.json::<Value>().await.unwrap()["balance"], 350);
-    }
+    let alice_email = format!("alice-{suffix}@example.test");
+    let bob_email = format!("bob-{suffix}@example.test");
+    let alice_id = register(&client, &base, &alice_email).await;
+    let bob_id = register(&client, &base, &bob_email).await;
+    let alice = login(&client, &base, &alice_email, "secret").await;
+    let bob = login(&client, &base, &bob_email, "secret").await;
+    assert_customer_restrictions(&client, &base, &alice, service_id, &suffix).await;
 
+    top_up(
+        &client,
+        &base,
+        &alice,
+        &format!("alice-credit-{suffix}"),
+        5_000,
+    )
+    .await;
+    let duplicate = post(
+        &client,
+        &format!("{base}/top-ups"),
+        &alice,
+        json!({"external_id":format!("alice-credit-{suffix}"),"amount":5000}),
+    )
+    .await;
+    assert_ne!(duplicate.status(), StatusCode::CREATED);
+    assert_eq!(me(&client, &base, &alice).await["balance"], 5000);
+    top_up(&client, &base, &bob, &format!("bob-credit-{suffix}"), 2_000).await;
+    assert_eq!(me(&client, &base, &bob).await["balance"], 2000);
+
+    let purchase_external_id = format!("alice-purchase-{suffix}");
+    let purchase = post(
+        &client,
+        &format!("{base}/purchases"),
+        &alice,
+        json!({"external_id":purchase_external_id,"product_id":service_id}),
+    )
+    .await;
+    assert_eq!(purchase.status(), StatusCode::CREATED);
+    let purchase = purchase.json::<Value>().await.unwrap();
+    assert_eq!(purchase["amount"], 1299);
+    assert!(
+        purchase["fulfillment"]
+            .as_str()
+            .unwrap()
+            .contains("Upload your source image")
+    );
+    assert!(!purchase["license_key"].as_str().unwrap().is_empty());
+    assert_eq!(me(&client, &base, &alice).await["balance"], 3701);
+    assert_history_ownership(&client, &base, &alice, &bob, &purchase_external_id).await;
+
+    let insufficient_external_id = format!("insufficient-{suffix}");
+    let insufficient = post(
+        &client,
+        &format!("{base}/purchases"),
+        &alice,
+        json!({"external_id":insufficient_external_id,"product_id":expensive_id}),
+    )
+    .await;
+    assert_eq!(insufficient.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(me(&client, &base, &alice).await["balance"], 3701);
+    assert_history_absent(&client, &base, &alice, &insufficient_external_id).await;
+
+    let managed = create_and_cycle_product(&client, &base, &admin, &bob, &suffix).await;
+    assert_admin_views(
+        &client,
+        &base,
+        &admin,
+        alice_id,
+        bob_id,
+        &purchase_external_id,
+        &managed,
+    )
+    .await;
     server.abort();
 }
 
-async fn assert_deposits_require_assigned_addresses(
-    client: &Client,
-    base: &str,
-    pool: &AnyPool,
-    backend: Backend,
-    user_id: i64,
-) {
-    let sql = if backend == Backend::Sqlite {
-        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, unixepoch() + 60)"
-    } else {
-        "INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, EXTRACT(EPOCH FROM now()) + 60)"
-    };
-    sqlx::query(sql)
-        .bind("address-deposit-token")
-        .bind(user_id)
-        .execute(pool)
-        .await
-        .unwrap();
-
-    let addresses = client
-        .get(format!("{base}/addresses"))
-        .bearer_auth("address-deposit-token")
-        .send()
-        .await
-        .unwrap()
-        .json::<Vec<Value>>()
-        .await
-        .unwrap();
-    assert_eq!(addresses.len(), 3);
-    let destination = &addresses[0];
-    let profile = destination["profile"].clone();
-
-    let unknown = client
-        .post(format!("{base}/addresses"))
-        .bearer_auth("address-deposit-token")
-        .json(&json!({ "profile": "unknown-chain" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
-
-    let mut tasks = Vec::new();
-    for _ in 1..5 {
-        let client = client.clone();
-        let url = format!("{base}/addresses");
-        let profile = profile.clone();
-        tasks.push(tokio::spawn(async move {
-            client
-                .post(url)
-                .bearer_auth("address-deposit-token")
-                .json(&json!({ "profile": profile }))
-                .send()
-                .await
-                .unwrap()
-        }));
-    }
-    let mut indices = Vec::new();
-    for task in tasks {
-        let generated = task.await.unwrap();
-        assert_eq!(generated.status(), StatusCode::CREATED);
-        indices.push(
-            generated.json::<Value>().await.unwrap()["address_index"]
-                .as_i64()
-                .unwrap(),
-        );
-    }
-    indices.sort_unstable();
-    assert_eq!(indices, [1, 2, 3, 4]);
-    let limited = client
-        .post(format!("{base}/addresses"))
-        .bearer_auth("address-deposit-token")
-        .json(&json!({ "profile": profile }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(limited.status(), StatusCode::CONFLICT);
-
-    let rejected = client
-        .post(format!("{base}/transactions"))
-        .bearer_auth("address-deposit-token")
-        .json(&json!({
-            "external_id": "wrong-address",
-            "profile": profile,
-            "address": "not-assigned",
-            "amount": 1,
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(rejected.status(), StatusCode::CONFLICT);
-
-    let accepted = client
-        .post(format!("{base}/transactions"))
-        .bearer_auth("address-deposit-token")
-        .json(&json!({
-            "external_id": "assigned-address",
-            "profile": profile,
-            "address": destination["address"],
-            "amount": 1,
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(accepted.status(), StatusCode::CREATED);
-
-    let spent = client
-        .post(format!("{base}/expenses"))
-        .bearer_auth("address-deposit-token")
-        .json(&json!({
-            "external_id": "spend-addressed-deposit",
-            "amount": 1,
-            "description": "Deposit test offset",
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(spent.status(), StatusCode::CREATED);
+async fn reset_store(pool: &AnyPool) {
+    sqlx::raw_sql(
+        "DELETE FROM transactions; DELETE FROM sessions; DELETE FROM products; DELETE FROM users WHERE role = 'customer';",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
-async fn assert_assigned_addresses(pool: &AnyPool, backend: Backend, users: &[i64]) {
-    let placeholder = if backend == Backend::Sqlite {
-        "?"
-    } else {
-        "$1"
-    };
-    for user_id in users {
-        let sql = format!(
-            "SELECT profile, address, derivation_path FROM user_addresses WHERE user_id = {placeholder} ORDER BY profile"
-        );
-        let rows = sqlx::query(AssertSqlSafe(sql))
-            .bind(user_id)
-            .fetch_all(pool)
+async fn assert_seeded_store(pool: &AnyPool) {
+    let admin: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = 'admin' AND role = 'admin'")
+            .fetch_one(pool)
             .await
             .unwrap();
-        assert_eq!(rows.len(), 3);
-        for row in rows {
-            let profile: String = row.get("profile");
-            let address: String = row.get("address");
-            let path: String = row.get("derivation_path");
-            assert!(!profile.is_empty());
-            assert!(!address.is_empty());
-            assert!(path.contains(&user_id.to_string()));
-        }
-    }
+    let products: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM products")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(admin, 1);
+    assert_eq!(products, 4);
 }
 
-async fn assert_insufficient_balance_response(
-    client: &Client,
-    base: &str,
-    pool: &AnyPool,
-    backend: Backend,
-    user_id: i64,
-) {
-    let sql = if backend == Backend::Sqlite {
-        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, unixepoch() + 60)"
-    } else {
-        "INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, EXTRACT(EPOCH FROM now()) + 60)"
-    };
-    sqlx::query(sql)
-        .bind("insufficient-balance-token")
-        .bind(user_id)
-        .execute(pool)
-        .await
-        .unwrap();
-
-    let response = client
-        .post(format!("{base}/expenses"))
-        .bearer_auth("insufficient-balance-token")
-        .json(&json!({
-            "external_id": "expense-before-deposit",
-            "amount": 1,
-            "description": "Not funded",
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        response.json::<Value>().await.unwrap(),
-        json!({ "error": "insufficient balance" })
-    );
-}
-
-async fn assert_limits(client: &Client, base: &str) {
-    let oversized = client
-        .post(format!("{base}/limited"))
-        .body(format!(r#"{{"value":"{}"}}"#, "x".repeat(128)))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
-
-    for expected in [
-        StatusCode::OK,
-        StatusCode::OK,
-        StatusCode::TOO_MANY_REQUESTS,
-    ] {
-        let response = client
-            .post(format!("{base}/limited"))
-            .json(&json!({ "value": "small" }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), expected);
-        if expected == StatusCode::TOO_MANY_REQUESTS {
-            assert!(response.headers().contains_key("retry-after"));
-        }
-    }
-}
-
-async fn register_users_and_verify_altcha(client: &Client, base: &str) -> Vec<i64> {
-    let missing = client
-        .post(format!("{base}/users"))
-        .json(&json!({ "name": "Missing", "email": "missing@example.com", "password": "secret" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), StatusCode::FORBIDDEN);
-
-    let first_proof = altcha_proof(client, base).await;
-    let first = register(client, base, "Alice", "alice@example.com", &first_proof).await;
-    let replay = client
-        .post(format!("{base}/users"))
-        .json(&json!({
-            "name": "Replay",
-            "email": "replay@example.com",
-            "password": "secret",
-            "altcha": first_proof,
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(replay.status(), StatusCode::FORBIDDEN);
-
-    let mut ids = vec![first];
-    for (name, email) in [("Bob", "bob@example.com"), ("Carol", "carol@example.com")] {
-        ids.push(register(client, base, name, email, &altcha_proof(client, base).await).await);
-    }
-    ids
-}
-
-async fn register(client: &Client, base: &str, name: &str, email: &str, proof: &str) -> i64 {
+async fn register(client: &Client, base: &str, email: &str) -> i64 {
     let response = client
         .post(format!("{base}/users"))
-        .json(&json!({ "name": name, "email": email, "password": "secret", "altcha": proof }))
+        .json(&json!({"name":"Customer","email":email,"password":"secret"}))
         .send()
         .await
         .unwrap();
@@ -356,187 +207,263 @@ async fn register(client: &Client, base: &str, name: &str, email: &str, proof: &
         .unwrap()
 }
 
-async fn altcha_proof(client: &Client, base: &str) -> String {
+async fn login(client: &Client, base: &str, email: &str, password: &str) -> String {
     let response = client
-        .get(format!("{base}/challenge"))
+        .post(format!("{base}/tokens"))
+        .header(
+            "authorization",
+            format!("Basic {}", BASE64.encode(format!("{email}:{password}"))),
+        )
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["cache-control"], "no-store");
-    let challenge = response.json::<Challenge>().await.unwrap();
-    let solution = solve_challenge(SolveChallengeOptions::new(&challenge))
+    assert_eq!(response.status(), StatusCode::CREATED);
+    response.json::<Value>().await.unwrap()["token"]
+        .as_str()
         .unwrap()
-        .unwrap();
-    BASE64.encode(
-        serde_json::to_vec(&Payload {
-            challenge,
-            solution,
-        })
-        .unwrap(),
-    )
+        .to_owned()
 }
 
-async fn exercise_financial_triggers(pool: &AnyPool, backend: Backend, users: &[i64]) {
-    let mut tasks = Vec::new();
-    for &user_id in users {
-        for top_up in 0..4 {
-            let pool = pool.clone();
-            tasks.push(tokio::spawn(async move {
-                insert_deposit(
-                    &pool,
-                    backend,
-                    &format!("deposit-{user_id}-{top_up}"),
-                    user_id,
-                    "confirmed",
-                    100,
-                )
-                .await
-            }));
+async fn get(client: &Client, url: &str, token: Option<&str>) -> Value {
+    let mut request = client.get(url);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.json().await.unwrap()
+}
+
+async fn post(client: &Client, url: &str, token: &str, body: Value) -> reqwest::Response {
+    client
+        .post(url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn me(client: &Client, base: &str, token: &str) -> Value {
+    get(client, &format!("{base}/me"), Some(token)).await
+}
+
+async fn top_up(client: &Client, base: &str, token: &str, external_id: &str, amount: i64) {
+    let response = post(
+        client,
+        &format!("{base}/top-ups"),
+        token,
+        json!({"external_id":external_id,"amount":amount}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+async fn assert_customer_restrictions(
+    client: &Client,
+    base: &str,
+    token: &str,
+    product_id: i64,
+    suffix: &str,
+) {
+    for path in [
+        "admin/summary",
+        "admin/users",
+        "admin/transactions",
+        "admin/users/1/transactions",
+        "admin/products",
+    ] {
+        let response = client
+            .get(format!("{base}/{path}"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        if response.status() == StatusCode::OK {
+            let body = response.json::<Value>().await.unwrap();
+            assert!(body.is_null() || body.as_array().is_some_and(Vec::is_empty));
+        } else {
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
         }
     }
-    for task in tasks {
-        task.await.unwrap().unwrap();
+    let response = post(client, &format!("{base}/admin/products"), token, json!({"slug":format!("forbidden-{suffix}"),"name":"Forbidden","description":"Forbidden","category":"asset","price":1,"fulfillment":"private"})).await;
+    if response.status() == StatusCode::CREATED {
+        assert!(response.json::<Value>().await.unwrap().is_null());
+    } else {
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
-
-    for &user_id in users {
-        let pending = format!("pending-{user_id}");
-        insert_deposit(pool, backend, &pending, user_id, "pending", 50)
+    for (path, body) in [
+        (
+            format!("{base}/admin/products/{product_id}"),
+            json!({"slug":"unchanged","name":"Unchanged","description":"Unchanged","category":"asset","price":1,"fulfillment":"private"}),
+        ),
+        (
+            format!("{base}/admin/products/{product_id}/status"),
+            json!({"active":false}),
+        ),
+    ] {
+        let response = client
+            .put(path)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
             .await
             .unwrap();
-        update_status(pool, backend, "transactions", &pending, "confirmed")
-            .await
-            .unwrap();
-        update_status(pool, backend, "transactions", &pending, "pending")
-            .await
-            .unwrap();
-        update_status(pool, backend, "transactions", &pending, "confirmed")
-            .await
-            .unwrap();
-
-        let confirmed = format!("expense-{user_id}");
-        insert_expense(pool, backend, &confirmed, user_id, "confirmed", 75)
-            .await
-            .unwrap();
-        let pending_expense = format!("pending-expense-{user_id}");
-        insert_expense(pool, backend, &pending_expense, user_id, "pending", 25)
-            .await
-            .unwrap();
-        update_status(pool, backend, "expenses", &pending_expense, "confirmed")
-            .await
-            .unwrap();
-        update_status(pool, backend, "expenses", &pending_expense, "pending")
-            .await
-            .unwrap();
-        update_status(pool, backend, "expenses", &pending_expense, "confirmed")
-            .await
-            .unwrap();
-
-        assert!(
-            insert_deposit(pool, backend, &pending, user_id, "confirmed", 50)
-                .await
-                .is_err()
-        );
-        assert!(
-            insert_expense(
-                pool,
-                backend,
-                &format!("too-large-{user_id}"),
-                user_id,
-                "confirmed",
-                1_000
-            )
-            .await
-            .is_err()
-        );
+        if response.status() == StatusCode::OK {
+            assert!(response.json::<Value>().await.unwrap().is_null());
+        } else {
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
     }
 }
 
-async fn reset_database(pool: &AnyPool, backend: Backend) {
-    let sql = if backend == Backend::Sqlite {
-        "DELETE FROM expenses; DELETE FROM transactions; DELETE FROM sessions; DELETE FROM user_addresses; DELETE FROM users;"
-    } else {
-        "TRUNCATE expenses, transactions, sessions, wallet_counters, user_addresses, users RESTART IDENTITY CASCADE"
-    };
-    sqlx::raw_sql(sql).execute(pool).await.unwrap();
+async fn assert_history_ownership(
+    client: &Client,
+    base: &str,
+    alice: &str,
+    bob: &str,
+    external_id: &str,
+) {
+    let alice_history = get(client, &format!("{base}/transactions"), Some(alice)).await;
+    let bob_history = get(client, &format!("{base}/transactions"), Some(bob)).await;
+    assert!(
+        alice_history
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["external_id"] == external_id)
+    );
+    assert!(
+        bob_history
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["external_id"] != external_id)
+    );
 }
 
-async fn insert_deposit(
-    pool: &AnyPool,
-    backend: Backend,
-    external_id: &str,
-    user_id: i64,
-    status: &str,
-    amount: i64,
-) -> Result<(), sqlx::Error> {
-    let address_sql = if backend == Backend::Sqlite {
-        "SELECT profile, address FROM user_addresses WHERE user_id = ? ORDER BY profile LIMIT 1"
-    } else {
-        "SELECT profile, address FROM user_addresses WHERE user_id = $1 ORDER BY profile LIMIT 1"
-    };
-    let destination = sqlx::query(address_sql)
-        .bind(user_id)
-        .fetch_one(pool)
-        .await?;
-    let profile: String = destination.get("profile");
-    let address: String = destination.get("address");
-    let sql = if backend == Backend::Sqlite {
-        "INSERT INTO transactions (external_id, user_id, profile, address, type, status, amount) VALUES (?, ?, ?, ?, 'deposit', ?, ?)"
-    } else {
-        "INSERT INTO transactions (external_id, user_id, profile, address, type, status, amount) VALUES ($1, $2, $3, $4, 'deposit', $5, $6)"
-    };
-    sqlx::query(sql)
-        .bind(external_id)
-        .bind(user_id)
-        .bind(profile)
-        .bind(address)
-        .bind(status)
-        .bind(amount)
-        .execute(pool)
-        .await
-        .map(|_| ())
+async fn assert_history_absent(client: &Client, base: &str, token: &str, external_id: &str) {
+    let history = get(client, &format!("{base}/transactions"), Some(token)).await;
+    assert!(
+        history
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["external_id"] != external_id)
+    );
 }
 
-async fn insert_expense(
-    pool: &AnyPool,
-    backend: Backend,
-    external_id: &str,
-    user_id: i64,
-    status: &str,
-    amount: i64,
-) -> Result<(), sqlx::Error> {
-    let sql = if backend == Backend::Sqlite {
-        "INSERT INTO expenses (external_id, user_id, status, amount) VALUES (?, ?, ?, ?)"
-    } else {
-        "INSERT INTO expenses (external_id, user_id, status, amount) VALUES ($1, $2, $3, $4)"
-    };
-    sqlx::query(sql)
-        .bind(external_id)
-        .bind(user_id)
-        .bind(status)
-        .bind(amount)
-        .execute(pool)
+async fn create_and_cycle_product(
+    client: &Client,
+    base: &str,
+    admin: &str,
+    bob: &str,
+    suffix: &str,
+) -> String {
+    let slug = format!("managed-{suffix}");
+    let created = post(client, &format!("{base}/admin/products"), admin, json!({"slug":slug,"name":"Managed","description":"Managed product","category":"asset","price":777,"fulfillment":"managed fulfillment"})).await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let product = created.json::<Value>().await.unwrap();
+    let id = product["id"].as_i64().unwrap();
+    let updated = client.put(format!("{base}/admin/products/{id}")).bearer_auth(admin).json(&json!({"slug":slug,"name":"Managed Updated","description":"Updated product","category":"asset","price":888,"fulfillment":"updated fulfillment"})).send().await.unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+    let disabled = client
+        .put(format!("{base}/admin/products/{id}/status"))
+        .bearer_auth(admin)
+        .json(&json!({"active":false}))
+        .send()
         .await
-        .map(|_| ())
+        .unwrap();
+    assert_eq!(disabled.status(), StatusCode::OK);
+    let blocked_id = format!("inactive-{suffix}");
+    let blocked = post(
+        client,
+        &format!("{base}/purchases"),
+        bob,
+        json!({"external_id":blocked_id,"product_id":id}),
+    )
+    .await;
+    assert_ne!(blocked.status(), StatusCode::CREATED);
+    assert_history_absent(client, base, bob, &blocked_id).await;
+    let enabled = client
+        .put(format!("{base}/admin/products/{id}/status"))
+        .bearer_auth(admin)
+        .json(&json!({"active":true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(enabled.status(), StatusCode::OK);
+    let external_id = format!("bob-purchase-{suffix}");
+    let purchase = post(
+        client,
+        &format!("{base}/purchases"),
+        bob,
+        json!({"external_id":external_id,"product_id":id}),
+    )
+    .await;
+    assert_eq!(purchase.status(), StatusCode::CREATED);
+    assert_eq!(purchase.json::<Value>().await.unwrap()["amount"], 888);
+    assert_eq!(me(client, base, bob).await["balance"], 1112);
+    external_id
 }
 
-async fn update_status(
-    pool: &AnyPool,
-    backend: Backend,
-    table: &str,
-    external_id: &str,
-    status: &str,
-) -> Result<(), sqlx::Error> {
-    assert!(matches!(table, "transactions" | "expenses"));
-    let sql = if backend == Backend::Sqlite {
-        format!("UPDATE {table} SET status = ? WHERE external_id = ?")
-    } else {
-        format!("UPDATE {table} SET status = $1 WHERE external_id = $2")
-    };
-    sqlx::query(AssertSqlSafe(sql))
-        .bind(status)
-        .bind(external_id)
-        .execute(pool)
-        .await
-        .map(|_| ())
+async fn assert_admin_views(
+    client: &Client,
+    base: &str,
+    admin: &str,
+    alice_id: i64,
+    bob_id: i64,
+    alice_purchase: &str,
+    bob_purchase: &str,
+) {
+    let summary = get(client, &format!("{base}/admin/summary"), Some(admin)).await;
+    assert_eq!(summary["user_count"], 3);
+    assert_eq!(summary["customer_count"], 2);
+    assert_eq!(summary["product_count"], 5);
+    assert_eq!(summary["transaction_count"], 4);
+    assert_eq!(summary["total_topups"], 7000);
+    assert_eq!(summary["total_sales"], 2187);
+    let users = get(client, &format!("{base}/admin/users"), Some(admin)).await;
+    assert_eq!(users.as_array().unwrap().len(), 3);
+    let transactions = get(client, &format!("{base}/admin/transactions"), Some(admin)).await;
+    assert!(
+        transactions
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["external_id"] == alice_purchase)
+    );
+    assert!(
+        transactions
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["external_id"] == bob_purchase)
+    );
+    let alice_transactions = get(
+        client,
+        &format!("{base}/admin/users/{alice_id}/transactions"),
+        Some(admin),
+    )
+    .await;
+    assert!(
+        alice_transactions
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["user_id"] == alice_id)
+    );
+    let bob_transactions = get(
+        client,
+        &format!("{base}/admin/users/{bob_id}/transactions"),
+        Some(admin),
+    )
+    .await;
+    assert!(
+        bob_transactions
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["user_id"] == bob_id)
+    );
 }

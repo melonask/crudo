@@ -12,6 +12,22 @@
 
 ## Troubleshooting
 
+### `crudo` did not start the API I expected
+
+**Cause:** `--config` selects a local path or HTTPS URL; otherwise crudo reads `./Crudo.toml`. There are no embedded routes or fallback configuration.
+
+**Fix:** Run with the intended explicit `--config` value, or create/update `./Crudo.toml`. Missing, malformed, or unreadable selected configuration is an error.
+
+### Startup reports a database or table error
+
+**Cause:** Omitting `[database]` only defaults to `sqlite://crudo.db?mode=rwc` and an empty setup list. It does not create tables required by custom SQL.
+
+**Fix:** Add idempotent `database.setup` statements for a small service, or apply managed migrations before startup in production.
+
+### Cargo mentions `generic-array`, `matchit`, or an “available” dependency
+
+`generic-array` 0.14.7 is transitive through RustCrypto `digest`/`crypto-common`; `crypto-common` 0.1.7 pins `generic-array = "=0.14.7"`. `matchit` 0.8.4 is transitive through Axum routing; resolved Axum 0.8.x pins `matchit = "=0.8.4"`. `(available: newer)` only reports a newer registry release that current transitive constraints disallow—not a stale direct crudo dependency or an installation failure.
+
 ### Startup says an environment variable is not set
 
 **Cause:** The selected TOML contains `${NAME}` without a supplied value.
@@ -20,8 +36,10 @@
 
 Environment requirements by configuration:
 
-- Built-in minimal starter: none
-- Full wallet demos: `WALLET_MNEMONIC`, `ALTCHA_SECRET`, and `ALTCHA_KEY_SECRET`
+- A configuration without environment expansions: none
+- `config/sqlite.toml`: none
+- `config/postgres.toml`: `DATABASE_URL`
+- Wallet or ALTCHA variables: only when the selected configuration references those optional features
 
 `WALLET_MNEMONIC` is not globally required by crudo.
 

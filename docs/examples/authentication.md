@@ -1,6 +1,6 @@
 # Basic to Bearer authentication
 
-This SQLite configuration hashes a password at registration, exchanges Basic credentials for a short-lived Bearer token, and scopes notes to the authenticated owner. Save it as `auth-notes.toml`.
+This SQLite configuration hashes a password at registration, exchanges Basic credentials for a short-lived Bearer token, and scopes notes to the authenticated owner. Save it as `auth-notes.toml`. It omits `server.prefix`, so routes remain unprefixed.
 
 ```toml
 [database]

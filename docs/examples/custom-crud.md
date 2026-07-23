@@ -1,6 +1,6 @@
 # Custom CRUD API
 
-Save this complete SQLite configuration as `tasks.toml`. Its idempotent setup is safe to run each time the server starts.
+Save this complete SQLite configuration as `tasks.toml`. Its idempotent setup is safe to run each time the server starts. It omits `server.prefix`, so routes remain unprefixed.
 
 ```toml
 [server]

@@ -1,149 +1,71 @@
-# Shipped full-demo API
+# Shipped store API
 
-`config/sqlite.toml` and `config/postgres.toml` mount these routes at `/v1`.
+`config/sqlite.toml` and `config/postgres.toml` are digital-store bootstraps. Both explicitly set `prefix = "v1"`; every route here is served under `/v1`. They seed four active products and demo-only `admin` / `admin` idempotently without overwriting edits. Change or remove that account before deployment.
 
-::: warning Demo policy
-These files demonstrate crudo's capabilities. Their public reads, token lifetime, and financial behavior are not a production-ready authorization or accounting policy.
+::: warning Development only
+Self-service top-ups create demo credit without payment-provider verification. Product and transaction setup is a demo bootstrap, not migration tooling or real payment processing. Do not expose it as-is.
 :::
 
-::: info Required full-demo environment
-Both full demos require `WALLET_MNEMONIC`, `ALTCHA_SECRET`, and `ALTCHA_KEY_SECRET`. No wallet passphrase variable is needed unless you add one to configuration.
-:::
+## Routes
 
-## Endpoints
-
-| Route | Protection | Success |
+| Served route | Access | Purpose |
 |---|---|---|
-| `GET /challenge` | None | ALTCHA challenge, `200`, no-store |
-| `POST /users` | ALTCHA | User, `201`. Initial wallet rows persist transactionally. |
-| `GET /users` | Public | Users, `200` |
-| `GET /users/{id}` | Public | User, `200`; `404` if absent. |
-| `POST /tokens` | Basic | Token, `201`, no-store |
-| `DELETE /users/{id}` | Basic or Bearer | User or `null`, `200` |
-| `GET /transactions` | Bearer | Caller transactions, `200` |
-| `GET /addresses` | Bearer | Caller addresses, `200` |
-| `POST /addresses` | Bearer | New selected-profile address, `201` |
-| `POST /transactions` | Bearer | Confirmed deposit, `201` |
-| `GET /expenses` | Bearer | Caller expenses, `200` |
-| `POST /expenses` | Bearer | Confirmed expense, `201`; insufficient funds `422`. |
+| `GET /v1/products` | Public | Active products only; fulfillment and license data are excluded. |
+| `POST /v1/users` | Public | Register a customer. |
+| `POST /v1/tokens` | Basic | Create a Bearer session token. |
+| `GET /v1/me` | Bearer | Current account and balance. |
+| `GET /v1/transactions` | Bearer | Caller’s transactions, including that caller’s fulfillment and license key. |
+| `POST /v1/top-ups` | Bearer | Add caller demo credit. |
+| `POST /v1/purchases` | Bearer | Buy one active product with caller balance. |
+| `GET /v1/admin/summary` | Admin Bearer | Store totals. |
+| `GET /v1/admin/users` | Admin Bearer | All users. |
+| `GET /v1/admin/transactions` | Admin Bearer | All transactions. |
+| `GET /v1/admin/users/{id}/transactions` | Admin Bearer | One user’s transactions. |
+| `GET /v1/admin/products` | Admin Bearer | All products, including inactive and fulfillment fields. |
+| `POST /v1/admin/products` | Admin Bearer | Create a product. |
+| `PUT /v1/admin/products/{id}` | Admin Bearer | Replace product fields. |
+| `PUT /v1/admin/products/{id}/status` | Admin Bearer | Set a product’s active status. |
 
-## Registration and challenge
+There are no public user listings, addresses, wallet routes, ALTCHA challenge, expenses, or generic transaction creation routes in these configurations.
 
-`GET /challenge` returns an ALTCHA v2 challenge. The values change per request.
+## Account and customer flows
 
-```json
-{"algorithm":"PBKDF2/SHA-256","challenge":"…","salt":"…","signature":"…","maxnumber":10000,"expires":1760000300}
-```
-
-Solve the challenge with an ALTCHA-compatible client and Base64-encode its payload.
-
-Send that value in the registration body:
+Register with `name`, `email`, and `password`:
 
 ```json
-{"name":"Ada","email":"ada@example.test","password":"correct horse","altcha":"<base64 proof>"}
+{"name":"Ada","email":"ada@example.test","password":"correct horse"}
 ```
 
-The `201` response contains the user, not the persisted initial wallet rows.
+`POST /v1/tokens` uses `Authorization: Basic <base64(email:password)>` and returns a token and expiry. Use it as `Authorization: Bearer <token>` for `/v1/me` and customer routes. Registration returns `201`; token creation returns `201`.
+
+Amounts and prices are integer **cents**. A top-up needs a caller-supplied, nonempty `external_id` and positive `amount`:
 
 ```json
-{"id":1,"name":"Ada","email":"ada@example.test"}
+{"external_id":"credit-001","amount":5000}
 ```
 
-Omitted or reused proof returns `403 {"error":"invalid, expired, or reused ALTCHA proof"}`. A duplicate email returns `409`.
-
-## Auth
-
-Create a token with `Authorization: Basic <base64(email:password)>`.
+A purchase needs its own `external_id` and an active `product_id`:
 
 ```json
-{"token":"illustrative-issued-token"}
+{"external_id":"order-001","product_id":1}
 ```
 
-Response metadata:
+`external_id` is unique across transactions, so it is the idempotency key: do not generate a new value when retrying the same intended operation. A confirmed top-up credits once; a confirmed purchase debits once and rejects insufficient balance with `422`. Purchases snapshot product name, fulfillment, and a generated license key into the buyer’s transaction. Those fulfillment and license fields are not public product data and are visible only to the buyer or an administrator through transaction routes.
 
-- Status: `201`
-- Header: `Cache-Control: no-store`
+`GET /v1/transactions` is owner-scoped. `GET /v1/products` returns only active products and deliberately omits fulfillment and license information.
 
-Use the returned value as `Authorization: Bearer …`. The token is neither stable nor predictable. Invalid credentials return `401`.
+## Administration
 
-## Users
-
-Public user reads are part of the demo policy.
+Administrator routes require a Bearer token belonging to a user with `role = "admin"`. Product creation and replacement require `slug`, `name`, `description`, `category` (`license`, `service`, `book`, or `asset`), positive integer `price` in cents, and `fulfillment`. Status updates send:
 
 ```json
-[{"id":1,"name":"Ada","email":"ada@example.test","balance":375}]
+{"active":false}
 ```
 
-`GET /users/1` returns the corresponding object. A missing ID returns:
+The SQLite configuration enforces its administrator predicate in SQL: a non-admin receives safe empty arrays or `null` for optional mutation results. PostgreSQL raises and maps the same condition to `403`. Clients must treat either behavior as denied access and must not infer authorization from an empty result.
 
-```json
-{"error":"resource not found"}
-```
+## Store frontend
 
-Deleting user `1` as that user returns:
+The frontend lives at [demo-crudo.github.io](https://demo-crudo.github.io/) and its source is [demo-crudo/demo-crudo.github.io](https://github.com/demo-crudo/demo-crudo.github.io), not this repository. Its visible **API URL** field accepts any compatible API base and defaults exactly to `http://127.0.0.1:3000/v1`. It is keyboard-accessible and provides a minimal customer dashboard (balance, demo credit, purchases, own history) or administrator dashboard (summary, users, transactions, products).
 
-```json
-{"id":1,"name":"Ada","email":"ada@example.test"}
-```
-
-Deleting an absent or non-owned user returns `null` with `200`, because the action uses `optional`.
-
-## Addresses
-
-List the caller's addresses with `GET /addresses`.
-
-```json
-[{"profile":"ethereum-mainnet","address_index":0,"address":"0xillustrativeAddress","derivation_path":"m/44'/60'/1'/0/0"}]
-```
-
-Create an address by selecting a profile:
-
-```json
-{"profile":"ethereum-mainnet"}
-```
-
-The `201` response identifies the allocated row.
-
-```json
-{"user_id":1,"profile":"ethereum-mainnet","address_index":1}
-```
-
-Actual addresses are derived values, not the illustrative value above. Unknown profiles return `400`; profile-index conflicts return `409`.
-
-## Transactions
-
-`GET /transactions` returns the caller's transactions.
-
-```json
-[{"id":7,"external_id":"chain-tx-42","profile":"ethereum-mainnet","address":"0xillustrativeAddress","type":"deposit","status":"confirmed","amount":500,"credited_at":1760000000,"created_at":1760000000}]
-```
-
-Create a confirmed deposit with this body:
-
-```json
-{"external_id":"chain-tx-42","profile":"ethereum-mainnet","address":"0xillustrativeAddress","amount":500}
-```
-
-The `201` response has the same fields for the new row. The profile and address must match one of the caller's stored addresses. A deposit credits once, even if a later status changes.
-
-## Expenses
-
-`GET /expenses` returns the caller's expenses.
-
-```json
-[{"id":3,"external_id":"order-42","status":"confirmed","amount":125,"description":"Subscription","debited_at":1760000010,"created_at":1760000010}]
-```
-
-Create a confirmed expense with this body:
-
-```json
-{"external_id":"order-42","amount":125,"description":"Subscription"}
-```
-
-The `201` response returns that object. Reusing an external ID returns `409`; insufficient balance returns:
-
-```json
-{"error":"insufficient balance"}
-```
-
-An expense debits once, even if a later status changes.
+The store configurations permit only `http://127.0.0.1:8000` and `http://localhost:8000` by default. Add `https://demo-crudo.github.io` explicitly to `server.cors.origins` before connecting the hosted UI to an HTTPS API. Since an HTTPS page cannot normally call an HTTP API due to mixed-content restrictions, use a locally served clone of the frontend for localhost HTTP testing; public use requires an HTTPS API and matching CORS origin. Crudo does not serve or hardcode the frontend.

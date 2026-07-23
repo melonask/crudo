@@ -1,5 +1,11 @@
 # Configuration workflow
 
+## Select configuration deliberately
+
+`--config` selects a local path or HTTPS URL explicitly. Without it, crudo reads `./Crudo.toml`. If neither is available, startup fails with guidance; unreadable or invalid selected configuration also fails startup. Installed binaries do not depend on a repository-relative `config/sqlite.toml`.
+
+For production, use an explicit reviewed `--config` path or URL, declare the database URL, and manage schema changes deliberately. Omitting `[database]` uses local `sqlite://crudo.db?mode=rwc` with no setup statements; it does not create custom tables. Omitting `[server]` uses `127.0.0.1:3000` with no prefix; set `prefix = "v1"` explicitly to mount routes below `/v1`.
+
 ## Expand environment variables
 
 Configuration is TOML. `${NAME}` is expanded everywhere before TOML parsing.
@@ -16,10 +22,10 @@ There is no escaping or fallback syntax.
 - `[wallets]` is optional.
 - To run without a mnemonic, omit `[wallets]` and every `actions.<name>.wallets` stage.
 - `passphrase` defaults to an empty string.
-- The shipped full configurations omit `WALLET_PASSPHRASE`.
+- The shipped store configurations do not configure wallets or ALTCHA.
 
-::: info Conditional full-demo secrets
-Their wallet stages require `${WALLET_MNEMONIC}`. Their ALTCHA configuration requires `${ALTCHA_SECRET}` and `${ALTCHA_KEY_SECRET}`. `WALLET_MNEMONIC` is not globally required by crudo.
+::: info Conditional feature secrets
+A configuration with wallet stages may require `${WALLET_MNEMONIC}`; one with `[altcha]` requires its configured secrets. Neither is globally required by crudo. `config/postgres.toml` requires `${DATABASE_URL}`; `config/sqlite.toml` has no environment expansion.
 :::
 
 ## Load remote configuration carefully

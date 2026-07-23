@@ -21,11 +21,11 @@ Use independent high-entropy ALTCHA `secret` and `key_secret` values.
 ## Demo policy
 
 ::: warning Replace demo policy in production
-The demo has 24-hour tokens, confirmed deposits and expenses, and public user reads. Full-demo configuration reads `ALTCHA_SECRET` and `ALTCHA_KEY_SECRET`; supply independent high-entropy values through a secret manager.
+The shipped store bootstrap seeds `admin` / `admin` and permits self-service demo credit without payment verification. Change or remove the account, remove the top-up flow, and implement payment verification before exposure. Wallet and ALTCHA secrets are required only when those optional features are configured; supply independent high-entropy ALTCHA values through a secret manager.
 :::
 
-## Starter boundary
+## Configuration boundary
 
-The built-in starter enables transactional setup and body, timeout, concurrency, and per-IP limits. It does not enable Basic/Bearer authentication, ALTCHA, or CORS.
+Crudo installs no routes or protections by default. Configure transactional setup, limits, authentication, ALTCHA, and CORS deliberately for each API.
 
 Add authentication and owner-scoped SQL before exposing equivalent CRUD routes publicly. See [deployment](/operations/deployment) for proxy, TLS, and replica boundaries.

@@ -27,45 +27,31 @@ features:
     details: Wallet stages can derive and persist supported public addresses atomically when configured.
 ---
 
-## Start a local API with no environment variables
+## Start a local API
 
-Install and start crudo:
+Install crudo and create `./Crudo.toml`:
 
 ```sh
 cargo install crudo
-crudo
-# Optional: in another terminal
-curl http://127.0.0.1:3000/v1/health
 ```
 
-The starter:
+```toml
+[[endpoints]]
+method = "GET"
+path = "/health"
+action = "health"
 
-- Writes `crudo.db` in the current writable directory.
-- Listens only on loopback for the native CLI.
-
-In another terminal, exercise the complete item lifecycle:
+[actions.health]
+sql = "SELECT 'ok' AS status"
+result = "one"
+```
 
 ```sh
-curl -X POST http://127.0.0.1:3000/v1/items \
-  -H 'content-type: application/json' -d '{"name":"tea"}'
-curl http://127.0.0.1:3000/v1/items
-curl -X PUT http://127.0.0.1:3000/v1/items/1 \
-  -H 'content-type: application/json' -d '{"name":"green tea"}'
-curl -X DELETE http://127.0.0.1:3000/v1/items/1
+crudo
+curl http://127.0.0.1:3000/health
 ```
 
-```jsonc
-// health → 200
-{"status":"ok"}
-// create → 201
-{"id":1,"name":"tea","created_at":1784232000,"updated_at":1784232000}
-// list → 200
-[{"id":1,"name":"tea","created_at":1784232000,"updated_at":1784232000}]
-// update → 200
-{"id":1,"name":"green tea","created_at":1784232000,"updated_at":1784232010}
-// delete → 200
-{"id":1}
-```
+Without `[database]`, crudo uses local `sqlite://crudo.db?mode=rwc`. Without `[server]`, it listens on `127.0.0.1:3000` with an empty prefix, so this endpoint is exactly `/health`. `--config` explicitly selects a local path or HTTPS URL; if it and `./Crudo.toml` are absent, startup fails with guidance.
 
 ## From TOML to JSON
 
@@ -87,6 +73,8 @@ params = ["body"]
 result = "one"
 status = 201
 ```
+
+This example omits `server.prefix`, so its route is `/notes`. Set `prefix = "v1"` under `[server]` only when it should be `/v1/notes`.
 
 ```sh
 curl -X POST http://127.0.0.1:3000/notes \
@@ -120,21 +108,21 @@ Invalid routes, action references, protection settings, and static configuration
 ::: info Wallet requirements are conditional
 Wallets are optional: `WALLET_MNEMONIC` is not required by crudo or by configurations that omit `[wallets]` and wallet action stages.
 
-The full demos require `WALLET_MNEMONIC`, `ALTCHA_SECRET`, and `ALTCHA_KEY_SECRET`. A wallet passphrase defaults to an empty string, so no passphrase variable is needed unless your configuration explicitly uses one.
+Wallet and ALTCHA features are independent of the shipped store configurations. A wallet passphrase defaults to an empty string when wallets are configured.
 :::
 
 | Configuration | Database and scope | Required environment |
 |---|---|---|
-| Built-in starter | Local SQLite health and item CRUD starter | None |
-| `config/sqlite.toml` | Full SQLite demo with ALTCHA and wallet stages | `WALLET_MNEMONIC`, `ALTCHA_SECRET`, `ALTCHA_KEY_SECRET` |
-| `config/postgres.toml` | Full PostgreSQL demo with ALTCHA and wallet stages | `DATABASE_URL` plus the three values above |
+| `config/minimal.toml` | Explicit local SQLite health and item CRUD example; `prefix = "v1"` | None |
+| `config/sqlite.toml` | Local digital-store bootstrap; creates `crudo-store.db`; `prefix = "v1"` | None |
+| `config/postgres.toml` | PostgreSQL digital-store bootstrap; `prefix = "v1"` | `DATABASE_URL` |
 
 ## Choose your next step
 
 ### Start
 
-- **[Getting started](/guide/getting-started)** — run and adapt the local starter.
-- **[curl lifecycle](/examples/curl)** — create, list, read, update, and delete an item.
+- **[Getting started](/guide/getting-started)** — create and run a local configuration.
+- **[curl lifecycle](/examples/curl)** — run the explicit minimal CRUD example.
 
 ### Design
 
@@ -150,11 +138,13 @@ The full demos require `WALLET_MNEMONIC`, `ALTCHA_SECRET`, and `ALTCHA_KEY_SECRE
 ### Explore
 
 - **[SQLite](/examples/sqlite)** and **[PostgreSQL](/examples/postgresql)** — compare shipped demo configurations.
-- **[Demo API](/reference/demo-api)**, **[Docker](/operations/docker)**, and **[GitHub](https://github.com/melonask/crudo)** — inspect the full demo, packaging, and source.
+- **[Live store demo](https://demo-crudo.github.io/)**, **[Store API](/reference/demo-api)**, **[Docker](/operations/docker)**, and **[GitHub](https://github.com/melonask/crudo)** — inspect the separately hosted frontend, store bootstrap, packaging, and source.
 
 ## Common recipes
 
-**Use a local config** — `crudo --config ./tasks.toml`
+**Use `./Crudo.toml` automatically** — `crudo`
+
+**Use a local config explicitly** — `crudo --config ./tasks.toml`
 
 **Load a reviewed HTTPS config** — `crudo --config https://config.example.com/tasks.toml`
 

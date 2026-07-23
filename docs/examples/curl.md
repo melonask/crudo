@@ -2,10 +2,10 @@
 
 ## Prerequisites
 
-Start the built-in [starter](/guide/getting-started). Timestamps in these responses are generated at runtime.
+Use the source-tree [`config/minimal.toml`](https://github.com/melonask/crudo/blob/main/config/minimal.toml) explicitly. It configures `prefix = "v1"`; timestamps in these responses are generated at runtime.
 
 ```sh
-crudo
+crudo --config config/minimal.toml
 ```
 
 ## Commands

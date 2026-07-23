@@ -1,6 +1,6 @@
 # Limits and mapped errors
 
-Server limits establish defaults; an endpoint can override any of them. This configuration limits every route, makes writes stricter, and converts a deliberate SQLite validation failure into a useful `422`.
+Server limits establish defaults; an endpoint can override any of them. This configuration limits every route, makes writes stricter, and converts a deliberate SQLite validation failure into a useful `422`. It omits `server.prefix`, so its route is `/transfers`.
 
 ```toml
 [server.limits]

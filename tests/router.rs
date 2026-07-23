@@ -404,253 +404,286 @@ async fn authenticated_clients_can_bypass_altcha_when_configured() {
 }
 
 #[tokio::test]
-async fn external_deposits_update_the_balance_exposed_by_the_api() {
+async fn sqlite_store_demo_lifecycle_enforces_ownership_and_admin_access() {
     let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("integration.db");
+    let database = directory.path().join("store.db");
     let database_url = format!("sqlite://{}?mode=rwc", database.display());
     let source = example_sqlite_config(&database_url);
     let config = Config::parse(&source).unwrap();
     let api_pool = connect(&config).await.unwrap();
     prepare_database(&api_pool, &config).await.unwrap();
-    sqlx::query("INSERT INTO users (name, email, password) VALUES (?, ?, ?)")
-        .bind("Owner")
-        .bind("owner@example.com")
-        .bind("unused")
-        .execute(&api_pool)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO user_addresses (user_id, profile, address_index, address, derivation_path) VALUES (?, ?, 0, ?, ?)",
-    )
-    .bind(1_i64)
-    .bind("test")
-    .bind("address-1")
-    .bind("m/1")
-    .execute(&api_pool)
-    .await
-    .unwrap();
     let app = build_router(api_pool, config).unwrap();
-
-    let writer = AnyPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO transactions (external_id, user_id, profile, address, type, status, amount) \
-         VALUES (?, ?, 'test', 'address-1', 'deposit', 'confirmed', ?)",
-    )
-    .bind("provider-1")
-    .bind(1_i64)
-    .bind(1_250_i64)
-    .execute(&writer)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO transactions (external_id, user_id, profile, address, type, status, amount) \
-         VALUES (?, ?, 'test', 'address-1', 'deposit', 'pending', ?)",
-    )
-    .bind("provider-2")
-    .bind(1_i64)
-    .bind(750_i64)
-    .execute(&writer)
-    .await
-    .unwrap();
-
-    assert_eq!(api_balance(&app, 1).await, 1_250);
-
-    sqlx::query("UPDATE transactions SET status = 'confirmed' WHERE external_id = ?")
-        .bind("provider-2")
-        .execute(&writer)
-        .await
-        .unwrap();
-    assert_eq!(api_balance(&app, 1).await, 2_000);
-
-    let duplicate = sqlx::query(
-        "INSERT INTO transactions (external_id, user_id, profile, address, type, status, amount) \
-         VALUES (?, ?, 'test', 'address-1', 'deposit', 'confirmed', ?)",
-    )
-    .bind("provider-1")
-    .bind(1_i64)
-    .bind(1_250_i64)
-    .execute(&writer)
-    .await;
-    assert!(duplicate.is_err());
-    assert_eq!(api_balance(&app, 1).await, 2_000);
-}
-
-#[tokio::test]
-async fn multiple_users_have_independent_deposits_and_expenses() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = directory.path().join("expenses.db");
-    let database_url = format!("sqlite://{}?mode=rwc", database.display());
-    let source = example_sqlite_config(&database_url);
-    let config = Config::parse(&source).unwrap();
-    let api_pool = connect(&config).await.unwrap();
-    prepare_database(&api_pool, &config).await.unwrap();
-    for (name, email) in [
-        ("Alice", "alice@example.com"),
-        ("Bob", "bob@example.com"),
-        ("Carol", "carol@example.com"),
-    ] {
-        sqlx::query("INSERT INTO users (name, email, password) VALUES (?, ?, ?)")
-            .bind(name)
-            .bind(email)
-            .bind("unused")
-            .execute(&api_pool)
+    let products = json_response(
+        app.clone()
+            .oneshot(request("GET", "/v1/products", Body::empty()))
             .await
-            .unwrap();
-    }
-    for user_id in 1_i64..=3 {
-        sqlx::query(
-            "INSERT INTO user_addresses (user_id, profile, address_index, address, derivation_path) VALUES (?, ?, 0, ?, ?)",
-        )
-        .bind(user_id)
-        .bind("test")
-        .bind(format!("address-{user_id}"))
-        .bind(format!("m/{user_id}"))
-        .execute(&api_pool)
-        .await
-        .unwrap();
-    }
-    let app = build_router(api_pool, config).unwrap();
-    let writer = AnyPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await
-        .unwrap();
-
-    for (external_id, user_id, amount) in [
-        ("deposit-a", 1_i64, 2_000_i64),
-        ("deposit-b", 2, 1_000),
-        ("deposit-c", 3, 500),
-    ] {
-        sqlx::query(
-            "INSERT INTO transactions (external_id, user_id, profile, address, type, status, amount) \
-             VALUES (?, ?, 'test', ?, 'deposit', 'confirmed', ?)",
-        )
-        .bind(external_id)
-        .bind(user_id)
-        .bind(format!("address-{user_id}"))
-        .bind(amount)
-        .execute(&writer)
-        .await
-        .unwrap();
-    }
-
-    sqlx::query(
-        "INSERT INTO expenses (external_id, user_id, status, amount, description) \
-         VALUES (?, ?, 'confirmed', ?, ?)",
+            .unwrap(),
     )
-    .bind("purchase-a")
-    .bind(1_i64)
-    .bind(600_i64)
-    .bind("Books")
-    .execute(&writer)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO expenses (external_id, user_id, status, amount, description) \
-         VALUES (?, ?, 'pending', ?, ?)",
-    )
-    .bind("purchase-b")
-    .bind(2_i64)
-    .bind(250_i64)
-    .bind("Groceries")
-    .execute(&writer)
-    .await
-    .unwrap();
-
-    assert_eq!(api_balance(&app, 1).await, 1_400);
-    assert_eq!(api_balance(&app, 2).await, 1_000);
-    assert_eq!(api_balance(&app, 3).await, 500);
-
-    sqlx::query("UPDATE expenses SET status = 'confirmed' WHERE external_id = ?")
-        .bind("purchase-b")
-        .execute(&writer)
-        .await
-        .unwrap();
-    assert_eq!(api_balance(&app, 2).await, 750);
-
-    sqlx::query("UPDATE expenses SET status = 'pending' WHERE external_id = ?")
-        .bind("purchase-a")
-        .execute(&writer)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE expenses SET status = 'confirmed' WHERE external_id = ?")
-        .bind("purchase-a")
-        .execute(&writer)
-        .await
-        .unwrap();
-    assert_eq!(api_balance(&app, 1).await, 1_400);
-
-    let duplicate = sqlx::query(
-        "INSERT INTO expenses (external_id, user_id, status, amount) \
-         VALUES (?, ?, 'confirmed', ?)",
-    )
-    .bind("purchase-a")
-    .bind(1_i64)
-    .bind(600_i64)
-    .execute(&writer)
     .await;
-    assert!(duplicate.is_err());
-    assert_eq!(api_balance(&app, 1).await, 1_400);
-
-    sqlx::query(
-        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, unixepoch() + 60)",
-    )
-    .bind("carol-token")
-    .bind(3_i64)
-    .execute(&writer)
-    .await
-    .unwrap();
-    let mut insufficient = request(
-        "POST",
-        "/v1/expenses",
-        Body::from(r#"{"external_id":"purchase-c","amount":600,"description":"Too expensive"}"#),
+    let products = products.as_array().unwrap();
+    assert_eq!(products.len(), 4);
+    assert!(
+        products
+            .iter()
+            .all(|product| product.get("fulfillment").is_none())
     );
-    insufficient
-        .headers_mut()
-        .insert(AUTHORIZATION, "Bearer carol-token".parse().unwrap());
-    let response = app.clone().oneshot(insufficient).await.unwrap();
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let body: Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(body, json!({ "error": "insufficient balance" }));
-    let rejected: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM expenses WHERE external_id = 'purchase-c'")
-            .fetch_one(&writer)
+    let product = products
+        .iter()
+        .find(|product| product["price"] == 1299)
+        .unwrap();
+    let product_id = product["id"].as_i64().unwrap();
+
+    let admin_token = login(&app, "admin", "admin").await;
+    assert_eq!(
+        json_response(
+            app.clone()
+                .oneshot(authorized_request(
+                    "GET",
+                    "/v1/me",
+                    &format!("Bearer {admin_token}"),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await["role"],
+        "admin"
+    );
+    let suffix = format!(
+        "{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let alice = register(&app, &format!("alice-{suffix}@example.test")).await;
+    let bob = register(&app, &format!("bob-{suffix}@example.test")).await;
+    let alice_token = login(&app, &alice, "secret").await;
+    let bob_token = login(&app, &bob, "secret").await;
+
+    for path in [
+        "/v1/admin/summary",
+        "/v1/admin/users",
+        "/v1/admin/transactions",
+        "/v1/admin/users/1/transactions",
+        "/v1/admin/products",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(authorized_request(
+                "GET",
+                path,
+                &format!("Bearer {alice_token}"),
+            ))
             .await
             .unwrap();
-    assert_eq!(rejected, 0);
-    assert_eq!(api_balance(&app, 3).await, 500);
+        if response.status() == StatusCode::OK {
+            let body = json_response(response).await;
+            assert!(body.is_null() || body.as_array().is_some_and(Vec::is_empty));
+        } else {
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+    let unauthorized_product = app.clone().oneshot(authorized_json_request("POST", "/v1/admin/products", &alice_token, json!({"slug":format!("forbidden-{suffix}"),"name":"Forbidden","description":"Forbidden","category":"asset","price":1,"fulfillment":"private"}))).await.unwrap();
+    if unauthorized_product.status() == StatusCode::CREATED {
+        assert!(json_response(unauthorized_product).await.is_null());
+    } else {
+        assert_eq!(unauthorized_product.status(), StatusCode::FORBIDDEN);
+    }
+    for (path, body) in [
+        (
+            format!("/v1/admin/products/{product_id}"),
+            json!({"slug":"unchanged","name":"Unchanged","description":"Unchanged","category":"asset","price":1,"fulfillment":"private"}),
+        ),
+        (
+            format!("/v1/admin/products/{product_id}/status"),
+            json!({"active":false}),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(authorized_json_request("PUT", &path, &alice_token, body))
+            .await
+            .unwrap();
+        if response.status() == StatusCode::OK {
+            assert!(json_response(response).await.is_null());
+        } else {
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+    assert_eq!(
+        json_response(
+            app.clone()
+                .oneshot(authorized_request(
+                    "GET",
+                    "/v1/admin/products",
+                    &format!("Bearer {admin_token}"),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await
+        .as_array()
+        .unwrap()
+        .len(),
+        4
+    );
+
+    top_up(&app, &alice_token, &format!("alice-credit-{suffix}"), 5_000).await;
+    let duplicate = app
+        .clone()
+        .oneshot(authorized_json_request(
+            "POST",
+            "/v1/top-ups",
+            &alice_token,
+            json!({"external_id":format!("alice-credit-{suffix}"),"amount":5000}),
+        ))
+        .await
+        .unwrap();
+    assert_ne!(duplicate.status(), StatusCode::CREATED);
+    assert_eq!(me_balance(&app, &alice_token).await, 5_000);
+    top_up(&app, &bob_token, &format!("bob-credit-{suffix}"), 2_000).await;
+    assert_eq!(me_balance(&app, &bob_token).await, 2_000);
+
+    let purchase_id = format!("alice-purchase-{suffix}");
+    let purchase = app
+        .clone()
+        .oneshot(authorized_json_request(
+            "POST",
+            "/v1/purchases",
+            &alice_token,
+            json!({"external_id":purchase_id,"product_id":product_id}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(purchase.status(), StatusCode::CREATED);
+    let purchase = json_response(purchase).await;
+    assert_eq!(purchase["amount"], 1299);
+    assert!(
+        purchase["fulfillment"]
+            .as_str()
+            .unwrap()
+            .contains("Upload your source image")
+    );
+    assert!(!purchase["license_key"].as_str().unwrap().is_empty());
+    assert_eq!(me_balance(&app, &alice_token).await, 3_701);
+    let alice_history = json_response(
+        app.clone()
+            .oneshot(authorized_request(
+                "GET",
+                "/v1/transactions",
+                &format!("Bearer {alice_token}"),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let bob_history = json_response(
+        app.clone()
+            .oneshot(authorized_request(
+                "GET",
+                "/v1/transactions",
+                &format!("Bearer {bob_token}"),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        alice_history
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["external_id"] == purchase_id)
+    );
+    assert!(
+        bob_history
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["external_id"] != purchase_id)
+    );
+
+    let rejected = app.clone().oneshot(authorized_json_request("POST", "/v1/purchases", &alice_token, json!({"external_id":format!("too-expensive-{suffix}"),"product_id":products.iter().find(|product| product["price"] == 4999).unwrap()["id"]}))).await.unwrap();
+    assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(me_balance(&app, &alice_token).await, 3_701);
 }
 
-async fn api_balance(app: &axum::Router, user_id: i64) -> i64 {
+fn example_sqlite_config(database_url: &str) -> String {
+    include_str!("../config/sqlite.toml").replace("sqlite://crudo-store.db?mode=rwc", database_url)
+}
+
+fn authorized_json_request(method: &str, uri: &str, token: &str, body: Value) -> Request<Body> {
+    let mut request = request(method, uri, Body::from(body.to_string()));
+    request
+        .headers_mut()
+        .insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+    request
+}
+
+async fn json_response(response: axum::response::Response) -> Value {
+    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
+}
+
+async fn register(app: &axum::Router, email: &str) -> String {
     let response = app
         .clone()
         .oneshot(request(
+            "POST",
+            "/v1/users",
+            Body::from(
+                json!({ "name": "Customer", "email": email, "password": "secret" }).to_string(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    email.to_owned()
+}
+
+async fn login(app: &axum::Router, email: &str, password: &str) -> String {
+    let basic = BASE64.encode(format!("{email}:{password}"));
+    let response = app
+        .clone()
+        .oneshot(authorized_request(
+            "POST",
+            "/v1/tokens",
+            &format!("Basic {basic}"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    json_response(response).await["token"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+async fn top_up(app: &axum::Router, token: &str, external_id: &str, amount: i64) {
+    let response = app
+        .clone()
+        .oneshot(authorized_json_request(
+            "POST",
+            "/v1/top-ups",
+            token,
+            json!({ "external_id": external_id, "amount": amount }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+async fn me_balance(app: &axum::Router, token: &str) -> i64 {
+    let response = app
+        .clone()
+        .oneshot(authorized_request(
             "GET",
-            &format!("/v1/users/{user_id}"),
-            Body::empty(),
+            "/v1/me",
+            &format!("Bearer {token}"),
         ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body: Value =
-        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    body["balance"].as_i64().unwrap()
-}
-
-fn example_sqlite_config(database_url: &str) -> String {
-    include_str!("../config/sqlite.toml")
-        .replace("sqlite://crudo.db?mode=rwc", database_url)
-        .replace(
-            "${WALLET_MNEMONIC}",
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-        )
-        .replace("${ALTCHA_SECRET}", "router-test-altcha-secret")
-        .replace("${ALTCHA_KEY_SECRET}", "router-test-altcha-key-secret")
+    json_response(response).await["balance"].as_i64().unwrap()
 }
 
 #[tokio::test]

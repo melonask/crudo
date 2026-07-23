@@ -6,6 +6,7 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
     pub(crate) database: Database,
     #[serde(default)]
     pub(crate) server: Server,
@@ -33,9 +34,23 @@ impl Config {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Database {
+    #[serde(default = "default_database_url")]
     pub(crate) url: String,
     #[serde(default)]
     pub(crate) setup: Vec<String>,
+}
+
+impl Default for Database {
+    fn default() -> Self {
+        Self {
+            url: default_database_url(),
+            setup: Vec::new(),
+        }
+    }
+}
+
+fn default_database_url() -> String {
+    "sqlite://crudo.db?mode=rwc".into()
 }
 
 #[derive(Deserialize)]
@@ -421,6 +436,53 @@ mod tests {
         .err()
         .unwrap();
         assert!(format!("{nested:#}").contains("body_btyes"));
+    }
+
+    #[test]
+    fn missing_database_uses_local_sqlite_defaults() {
+        let config = Config::parse("").unwrap();
+
+        assert_eq!(config.database.url, "sqlite://crudo.db?mode=rwc");
+        assert!(config.database.setup.is_empty());
+    }
+
+    #[test]
+    fn database_setup_without_url_uses_local_sqlite_default() {
+        let config = Config::parse(
+            r#"
+            [database]
+            setup = ["CREATE TABLE entries (id INTEGER PRIMARY KEY)"]
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.database.url, "sqlite://crudo.db?mode=rwc");
+        assert_eq!(
+            config.database.setup,
+            ["CREATE TABLE entries (id INTEGER PRIMARY KEY)"]
+        );
+    }
+
+    #[test]
+    fn health_only_configuration_uses_database_defaults() {
+        let config = Config::parse(
+            r#"
+            [[endpoints]]
+            method = "GET"
+            path = "/health"
+            action = "health"
+
+            [actions.health]
+            sql = "SELECT 'ok' AS status"
+            result = "one"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.database.url, "sqlite://crudo.db?mode=rwc");
+        assert!(config.database.setup.is_empty());
+        assert_eq!(config.endpoints.len(), 1);
+        assert!(config.actions.contains_key("health"));
     }
 
     #[test]
